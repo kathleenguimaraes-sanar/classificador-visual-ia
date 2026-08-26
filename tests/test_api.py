@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import ANALYSIS_LOCK, PROCESSOR, app, is_session_interruption
+from app import AI_API_KEYS, ANALYSIS_LOCK, PROCESSOR, app, is_session_interruption
 from src.portfolio.ai import AIError
 from src.portfolio.jw_session import JWSessionError
 
@@ -31,11 +32,21 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(ANALYSIS_LOCK.locked())
 
     def test_processing_requires_authenticated_jw_session(self):
-        response = self.client.post(
-            "/api/process",
-            json={"media_ids": ["y6zIncnf"], "provider": "Claude", "api_key": ""},
-        )
+        # Claude precisa de uma chave configurada (AI_API_KEYS) para
+        # passar da validação de provedor/chave e chegar à validação
+        # de sessão JW Player, que é o que este teste verifica.
+        # Sem isso, a requisição falha antes com 422 (chave ausente),
+        # independente da sessão estar conectada ou não.
+        with patch.dict(AI_API_KEYS, {"Claude": "test-key"}):
+            response = self.client.post(
+                "/api/process",
+                json={"media_ids": ["y6zIncnf"], "provider": "Claude", "api_key": ""},
+            )
         self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"],
+            "Conecte o JW Player antes de processar.",
+        )
 
     def test_processing_rejects_removed_ai_providers(self):
         response = self.client.post(
@@ -43,7 +54,10 @@ class ApiTests(unittest.TestCase):
             json={"media_ids": ["y6zIncnf"], "provider": "OpenAI", "api_key": "key"},
         )
         self.assertEqual(response.status_code, 422)
-        self.assertEqual(response.json()["detail"], "Selecione Claude ou Ollama.")
+        self.assertEqual(
+            response.json()["detail"],
+            "Selecione Gemini, Claude ou Ollama.",
+        )
 
     def test_session_interruption_is_not_a_media_error(self):
         self.assertTrue(is_session_interruption(JWSessionError("Conecte uma sessão JW Player antes de acessar a mídia.")))

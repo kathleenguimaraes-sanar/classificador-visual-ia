@@ -1,0 +1,46 @@
+# ==========================================================
+# Blueprint do Render — Portfólio de vídeos Cetrus
+# ==========================================================
+#
+# Nenhum valor de segredo fica aqui (sync: false = configurar
+# manualmente em Render > Environment). Veja o README.md para
+# o passo a passo completo de deploy.
+
+services:
+  - type: web
+    name: portfolio-cetrus
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # "starter" (ou superior) é recomendado: o plano Free
+    # "dorme" após inatividade de requisições HTTP, e um lote
+    # de processamento roda em thread de fundo sem gerar
+    # requisições — o serviço pode ser suspenso no meio de um
+    # lote grande. Ajuste conforme o plano da sua conta.
+    plan: starter
+
+    healthCheckPath: /health
+
+    # Somente as variáveis que app.py (o serviço web) realmente
+    # lê via os.getenv. JW_SITE_ID, JW_DELIVERY_TOKEN, FRAME_COUNT
+    # e MAX_RETRIES existem em .env.example mas pertencem à CLI
+    # legada (main.py / src/portfolio/config.py) — não têm efeito
+    # nenhum aqui e por isso não estão listadas.
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      - key: ENABLE_OLLAMA
+        value: "false"
+
+      - key: CETRUS_DATA_DIR
+        value: /data
+
+    disk:
+      name: cetrus-data
+      mountPath: /data
+      sizeGB: 1
