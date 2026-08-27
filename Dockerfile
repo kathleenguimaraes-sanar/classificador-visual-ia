@@ -1,14 +1,3 @@
-# ==========================================================
-# Portfólio de vídeos Cetrus — imagem de produção (Render)
-# ==========================================================
-#
-# Docker é necessário aqui porque o serviço depende de duas
-# dependências de SISTEMA que o runtime nativo do Render não
-# fornece:
-#   - ffmpeg (extração de frames e áudio, via subprocess)
-#   - Chromium + libs do sistema exigidas pelo Playwright
-#     (login/sessão do JW Player, headless, no mesmo processo
-#     do FastAPI — não existe um "agente" separado a preservar)
 
 FROM python:3.12-slim
 
