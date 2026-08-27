@@ -8,6 +8,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,6 +31,9 @@ from src.portfolio.ingestion import (
 from src.portfolio.jw_session import (
     JWBrowserSession,
     JWSessionError,
+)
+from src.portfolio.jwplayer import (
+    JWPlayerClient,
 )
 from src.portfolio.frames import extract_frames
 from src.portfolio.transcription import transcribe_hls
@@ -187,6 +191,23 @@ AVAILABLE_PROVIDERS_MESSAGE = (
 
 
 # ==========================================================
+# FILTRO DE DATA DE PUBLICAÇÃO (JW PLAYER)
+# ==========================================================
+#
+# Reaproveita a variável já documentada em .env.example
+# (antes usada só pela CLI legada). Necessária apenas para
+# mídias protegidas na API de delivery do JW Player — a
+# maioria das consultas funciona sem token.
+
+JW_DELIVERY_TOKEN = os.getenv(
+    "JW_DELIVERY_TOKEN",
+    "",
+).strip()
+
+PUBLISH_DATE_CHECK_WORKERS = 8
+
+
+# ==========================================================
 # INSTÂNCIAS
 # ==========================================================
 
@@ -323,6 +344,31 @@ class AnalyzeJWPlayerRequest(BaseModel):
     library: str = DEFAULT_JW_LIBRARY
 
     property_id: str = ""
+
+    provider: str = "Gemini"
+
+    model: str = "gemini-3.6-flash"
+
+    ollama_url: str = (
+        "http://127.0.0.1:11434"
+    )
+
+    whisper_model: str = "small"
+
+    analysis_mode: str = "frames"
+
+    frame_count: int = Field(
+        default=8,
+        ge=4,
+        le=16,
+    )
+
+    min_publish_date: str = ""
+
+    include_missing_date: bool = False
+
+
+class StartEligibleRequest(BaseModel):
 
     provider: str = "Gemini"
 
@@ -532,6 +578,250 @@ def build_process_request(
 
         frame_count=frame_count,
     )
+
+
+# ==========================================================
+# FILTRO DE DATA DE PUBLICAÇÃO (JW PLAYER)
+# ==========================================================
+#
+# Nova etapa ANTES do processamento/IA: consulta o Publish
+# date de cada vídeo na API de delivery do JW Player (já usada
+# pelo projeto em src/portfolio/jwplayer.py, só que até agora
+# apenas pela CLI legada) e decide se o vídeo é elegível para
+# análise, sem baixar vídeo, extrair frame ou chamar IA.
+#
+# Reaproveita a mesma tabela `videos` (publish_date,
+# filter_status, filter_reason, eligible_for_analysis) — não
+# apaga nem substitui nenhum registro original da planilha.
+
+def parse_publish_date_cutoff(
+    value: str,
+) -> date | None:
+
+    value = str(
+        value or ""
+    ).strip()
+
+    if not value:
+        return None
+
+    try:
+
+        return date.fromisoformat(
+            value
+        )
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Data mínima de publicação inválida. "
+                "Utilize o formato AAAA-MM-DD."
+            ),
+        ) from exc
+
+
+def classify_publish_date(
+    publish_date,
+    cutoff: date,
+    include_missing_date: bool,
+) -> tuple[str, str, bool]:
+
+    """
+    Retorna (filter_status, filter_reason, eligible_for_analysis).
+
+    filter_status é a categoria para relatório (eligible /
+    filtered / no_date); eligible_for_analysis é o valor que
+    realmente controla se o vídeo entra na fila.
+    """
+
+    if publish_date is None:
+
+        eligible = bool(
+            include_missing_date
+        )
+
+        return (
+            "no_date",
+            (
+                "missing_date_included"
+                if eligible
+                else "date_not_found"
+            ),
+            eligible,
+        )
+
+    if publish_date.date() >= cutoff:
+
+        return (
+            "eligible",
+            "within_date_range",
+            True,
+        )
+
+    return (
+        "filtered",
+        "published_before_cutoff",
+        False,
+    )
+
+
+def check_publish_dates(
+    jwplayer_ids: list[str],
+    site_id: str,
+    min_publish_date: str,
+    include_missing_date: bool = False,
+) -> dict:
+
+    """
+    Consulta o Publish date de cada JWPlayer ID e persiste o
+    resultado do filtro em `videos`. Um erro individual não
+    interrompe os demais vídeos.
+
+    Sem `min_publish_date` configurado, todos os vídeos são
+    marcados elegíveis sem nenhuma chamada ao JW Player — o
+    filtro é opcional, não obrigatório.
+    """
+
+    summary = {
+
+        "total": len(jwplayer_ids),
+
+        "eligible": 0,
+
+        "filtered": 0,
+
+        "no_date": 0,
+
+        "errors": 0,
+
+        "will_be_analyzed": 0,
+    }
+
+    if not jwplayer_ids:
+        return summary
+
+    cutoff = parse_publish_date_cutoff(
+        min_publish_date
+    )
+
+    if cutoff is None:
+
+        for jwplayer_id in jwplayer_ids:
+
+            DATABASE.update_filter_result(
+                jwplayer_id,
+                publish_date=None,
+                filter_status="eligible",
+                filter_reason="no_filter_applied",
+                eligible_for_analysis=True,
+            )
+
+        summary["eligible"] = len(
+            jwplayer_ids
+        )
+
+        summary["will_be_analyzed"] = len(
+            jwplayer_ids
+        )
+
+        return summary
+
+    client = JWPlayerClient(
+        site_id=site_id,
+        token=JW_DELIVERY_TOKEN,
+    )
+
+    def fetch_one(jwplayer_id: str):
+
+        try:
+
+            asset = client.playback(
+                jwplayer_id
+            )
+
+            return (
+                jwplayer_id,
+                asset.publish_date,
+                None,
+            )
+
+        except Exception as exc:
+
+            return (
+                jwplayer_id,
+                None,
+                str(exc),
+            )
+
+    with ThreadPoolExecutor(
+        max_workers=PUBLISH_DATE_CHECK_WORKERS,
+    ) as executor:
+
+        results = list(
+            executor.map(
+                fetch_one,
+                jwplayer_ids,
+            )
+        )
+
+    for jwplayer_id, publish_date, error in results:
+
+        if error is not None:
+
+            logger.warning(
+                "Falha ao consultar Publish date "
+                "| jwplayer_id=%s erro=%s",
+                jwplayer_id,
+                error,
+            )
+
+            DATABASE.update_filter_result(
+                jwplayer_id,
+                publish_date=None,
+                filter_status="error",
+                filter_reason="publish_date_unavailable",
+                eligible_for_analysis=False,
+            )
+
+            summary["errors"] += 1
+
+            continue
+
+        (
+            filter_status,
+            filter_reason,
+            eligible,
+        ) = classify_publish_date(
+            publish_date,
+            cutoff,
+            include_missing_date,
+        )
+
+        DATABASE.update_filter_result(
+            jwplayer_id,
+            publish_date=(
+                publish_date.isoformat()
+                if publish_date
+                else None
+            ),
+            filter_status=filter_status,
+            filter_reason=filter_reason,
+            eligible_for_analysis=eligible,
+        )
+
+        if filter_status == "eligible":
+            summary["eligible"] += 1
+        elif filter_status == "no_date":
+            summary["no_date"] += 1
+        else:
+            summary["filtered"] += 1
+
+        if eligible:
+            summary["will_be_analyzed"] += 1
+
+    return summary
 
 
 # ==========================================================
@@ -772,6 +1062,14 @@ async def import_and_process(
     frame_count: int = Form(
         8
     ),
+
+    min_publish_date: str = Form(
+        ""
+    ),
+
+    include_missing_date: bool = Form(
+        False
+    ),
 ):
     if provider not in AVAILABLE_PROVIDERS:
 
@@ -779,6 +1077,12 @@ async def import_and_process(
             status_code=422,
             detail=AVAILABLE_PROVIDERS_MESSAGE,
         )
+
+    # Validar o formato da data cedo, antes de gastar tempo
+    # importando a planilha, se estiver malformada.
+    parse_publish_date_cutoff(
+        min_publish_date
+    )
 
     library_key = normalize_library(library)
     library_config = JW_LIBRARIES[library_key]
@@ -883,36 +1187,21 @@ async def import_and_process(
 
     ]
 
-    request = (
+    # --------------------------------------------------------
+    # FILTRO DE PUBLICAÇÃO — ANTES de qualquer processamento
+    # --------------------------------------------------------
+    #
+    # A planilha NÃO inicia mais a análise automaticamente.
+    # Esta etapa apenas consulta o Publish date de cada vídeo
+    # pendente e marca elegibilidade — nenhum vídeo é baixado,
+    # nenhum frame é extraído, nenhuma IA é chamada aqui. O
+    # usuário revisa o resumo e confirma em /api/start-eligible.
 
-        build_process_request(
-
-            media_ids=pending_media,
-
-            provider=provider,
-
-            model=model,
-
-            ollama_url=ollama_url,
-
-            whisper_model=whisper_model,
-
-            analysis_mode=analysis_mode,
-
-            frame_count=frame_count,
-
-        )
-
-        if pending_media
-
-        else None
-
-    )
-
-    queued = (
-        enqueue_jobs(request)
-        if request
-        else []
+    filter_summary = check_publish_dates(
+        pending_media,
+        site_id=library_config["property_id"],
+        min_publish_date=min_publish_date,
+        include_missing_date=include_missing_date,
     )
 
     return {
@@ -924,14 +1213,88 @@ async def import_and_process(
         "pending_media":
             len(pending_media),
 
-        "jobs":
-            queued,
+        "filter":
+            filter_summary,
 
         "library":
-            CURRENT_JW_LIBRARY,
+            library_key,
 
         "property_id":
-            CURRENT_JW_PROPERTY_ID,
+            library_config["property_id"],
+    }
+
+
+# ==========================================================
+# INICIAR ANÁLISE (SOMENTE VÍDEOS ELEGÍVEIS)
+# ==========================================================
+#
+# Botão "Iniciar análise": só é chamado depois que o usuário
+# revisou o resumo do filtro de publicação. Enfileira apenas
+# os JWPlayer IDs já marcados eligible_for_analysis=1 na
+# execução (run_id) atual — vídeos filtrados/sem data/erro
+# nunca chegam a este ponto.
+
+@app.post("/api/start-eligible")
+def start_eligible(
+    request: StartEligibleRequest,
+):
+
+    states = {
+
+        item["jwplayer_id"]:
+            item["status"]
+
+        for item in DATABASE.unique_media()
+
+    }
+
+    eligible_media = [
+
+        jwplayer_id
+
+        for jwplayer_id in DATABASE.eligible_media_for_current_run()
+
+        if states.get(
+            jwplayer_id
+        ) != "Concluído"
+
+    ]
+
+    if not eligible_media:
+
+        return {
+            "jobs": [],
+            "media_count": 0,
+            "message": (
+                "Nenhum vídeo elegível pendente "
+                "para iniciar análise."
+            ),
+        }
+
+    process_request = build_process_request(
+
+        media_ids=eligible_media,
+
+        provider=request.provider,
+
+        model=request.model,
+
+        ollama_url=request.ollama_url,
+
+        whisper_model=request.whisper_model,
+
+        analysis_mode=request.analysis_mode,
+
+        frame_count=request.frame_count,
+    )
+
+    queued = enqueue_jobs(
+        process_request
+    )
+
+    return {
+        "jobs": queued,
+        "media_count": len(eligible_media),
     }
 
 
@@ -2068,6 +2431,54 @@ def analyze_jwplayer(
     )
 
     # ------------------------------------------------------
+    # FILTRO DE PUBLICAÇÃO
+    # ------------------------------------------------------
+    #
+    # A análise individual respeita o mesmo filtro da planilha
+    # — não é uma exceção silenciosa. Sem min_publish_date
+    # informado, todo vídeo é elegível (comportamento anterior
+    # preservado).
+
+    filter_summary = check_publish_dates(
+        [jwplayer_id],
+        site_id=library["property_id"],
+        min_publish_date=request.min_publish_date,
+        include_missing_date=request.include_missing_date,
+    )
+
+    if filter_summary["will_be_analyzed"] == 0:
+
+        with DATABASE.connect() as connection:
+
+            filtered_row = connection.execute(
+                """
+                SELECT publish_date, filter_status, filter_reason
+
+                FROM videos
+
+                WHERE jwplayer_id = ?
+
+                LIMIT 1
+                """,
+                (jwplayer_id,),
+            ).fetchone()
+
+        raise HTTPException(
+
+            status_code=422,
+
+            detail=(
+
+                "Este vídeo não é elegível para análise "
+                "pelo filtro de data de publicação "
+                f"(Publish date: "
+                f"{filtered_row['publish_date'] if filtered_row else 'não encontrado'}, "
+                f"motivo: "
+                f"{filtered_row['filter_reason'] if filtered_row else 'desconhecido'})."
+            ),
+        )
+
+    # ------------------------------------------------------
     # ENFILEIRAR
     # ------------------------------------------------------
 
@@ -2181,6 +2592,31 @@ def validate(
 # EXPORTAÇÃO CSV
 # ==========================================================
 
+def _rows_for_csv_export() -> list[dict]:
+
+    rows = []
+
+    for row in DATABASE.list_portfolio():
+
+        row = dict(row)
+
+        eligible = row.get(
+            "eligible_for_analysis"
+        )
+
+        row["eligible_for_analysis"] = (
+            "SIM"
+            if eligible == 1
+            else "NÃO"
+            if eligible == 0
+            else ""
+        )
+
+        rows.append(row)
+
+    return rows
+
+
 @app.get("/api/export.csv")
 def export_csv():
 
@@ -2207,6 +2643,14 @@ def export_csv():
         "confidence",
 
         "keywords",
+
+        "publish_date",
+
+        "filter_status",
+
+        "eligible_for_analysis",
+
+        "filter_reason",
 
     ]
 
@@ -2250,10 +2694,22 @@ def export_csv():
 
         "keywords":
             "Palavras-chave",
+
+        "publish_date":
+            "Publish date",
+
+        "filter_status":
+            "Filtro de data",
+
+        "eligible_for_analysis":
+            "Elegível para análise",
+
+        "filter_reason":
+            "Motivo do filtro",
     })
 
     writer.writerows(
-        DATABASE.list_portfolio()
+        _rows_for_csv_export()
     )
 
     return Response(

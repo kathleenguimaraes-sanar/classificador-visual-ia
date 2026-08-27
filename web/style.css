@@ -710,6 +710,19 @@ label select {
   background: #fff5df;
 }
 
+.checkbox-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  margin: 4px 0;
+}
+
+.checkbox-inline input {
+  margin: 0;
+  width: auto;
+}
+
 /* ==========================================================
    UPLOAD
    ========================================================== */

@@ -351,6 +351,58 @@
 
 
                     <!-- ==================================================
+                         FILTRO DE PUBLICAÇÃO
+                    =================================================== -->
+
+                    <div
+                        class="callout"
+                        id="publish-date-filter"
+                    >
+
+                        <strong>
+                            Filtro de publicação
+                        </strong>
+
+
+                        <label>
+                            Data mínima de publicação
+
+                            <input
+                                id="min-publish-date"
+                                type="date"
+                            >
+                        </label>
+
+
+                        <label class="checkbox-inline">
+                            <input
+                                id="enable-publish-filter"
+                                type="checkbox"
+                            >
+                            Ignorar vídeos publicados antes
+                            da data selecionada
+                        </label>
+
+
+                        <label class="checkbox-inline">
+                            <input
+                                id="include-missing-date"
+                                type="checkbox"
+                            >
+                            Incluir vídeos sem data de
+                            publicação na análise
+                        </label>
+
+
+                        <span>
+                            Aplica-se tanto à planilha quanto
+                            à análise por um único JWPlayer ID.
+                        </span>
+
+                    </div>
+
+
+                    <!-- ==================================================
                          OPÇÃO 1 - PLANILHA
                     =================================================== -->
 
@@ -393,6 +445,19 @@
 
 
                         <div id="import-result"></div>
+
+
+                        <div id="filter-summary"></div>
+
+
+                        <button
+                            class="button primary wide"
+                            id="start-eligible"
+                            type="button"
+                            style="display: none"
+                        >
+                            Iniciar análise
+                        </button>
 
                     </div>
 
@@ -651,7 +716,7 @@
                         type="button"
                         disabled
                     >
-                        Enviar planilha e iniciar análise
+                        Enviar planilha
                     </button>
 
                 </div>

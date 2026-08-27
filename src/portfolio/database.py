@@ -87,7 +87,15 @@ CREATE TABLE IF NOT EXISTS videos (
 
     updated_at TEXT NOT NULL,
 
-    run_id INTEGER
+    run_id INTEGER,
+
+    publish_date TEXT,
+
+    filter_status TEXT NOT NULL DEFAULT 'pending',
+
+    filter_reason TEXT,
+
+    eligible_for_analysis INTEGER
 );
 
 
@@ -313,6 +321,18 @@ class Database:
                 "TEXT",
 
             "run_id":
+                "INTEGER",
+
+            "publish_date":
+                "TEXT",
+
+            "filter_status":
+                "TEXT NOT NULL DEFAULT 'pending'",
+
+            "filter_reason":
+                "TEXT",
+
+            "eligible_for_analysis":
                 "INTEGER",
         }
 
@@ -1192,6 +1212,128 @@ class Database:
             )
 
     # ======================================================
+    # FILTRO DE DATA DE PUBLICAÇÃO
+    # ======================================================
+    #
+    # Resultado da checagem de Publish date (JW Player) contra
+    # a data mínima configurada pelo usuário. Não apaga nem
+    # substitui nenhuma linha — apenas marca o resultado do
+    # filtro em `videos`, mantendo todos os registros originais
+    # da planilha intactos.
+
+    def update_filter_result(
+        self,
+        jwplayer_id: str,
+        *,
+        publish_date: str | None,
+        filter_status: str,
+        filter_reason: str,
+        eligible_for_analysis: bool,
+    ) -> None:
+
+        jwplayer_id = str(
+            jwplayer_id
+        ).strip()
+
+        now = utc_now()
+
+        with self.connect() as connection:
+
+            connection.execute(
+                """
+                UPDATE videos
+
+                SET
+                    publish_date = ?,
+                    filter_status = ?,
+                    filter_reason = ?,
+                    eligible_for_analysis = ?,
+                    atualizado_em = ?
+
+                WHERE jwplayer_id = ?
+                """,
+                (
+                    publish_date,
+                    filter_status,
+                    filter_reason,
+                    1 if eligible_for_analysis else 0,
+                    now,
+                    jwplayer_id,
+                ),
+            )
+
+    def media_pending_filter_check(
+        self,
+    ) -> list[dict]:
+
+        """
+        JWPlayer IDs distintos da execução (run_id) atual que
+        ainda não passaram pela checagem de Publish date.
+        """
+
+        query = """
+        SELECT DISTINCT
+
+            v.jwplayer_id,
+
+            v.lesson_name
+
+        FROM videos v
+
+        WHERE v.run_id = (
+            SELECT MAX(id) FROM imports
+        )
+
+        AND (
+            v.filter_status IS NULL
+            OR v.filter_status = 'pending'
+        )
+        """
+
+        with self.connect() as connection:
+
+            return [
+                dict(row)
+
+                for row in connection.execute(
+                    query
+                )
+            ]
+
+    def eligible_media_for_current_run(
+        self,
+    ) -> list[str]:
+
+        """
+        JWPlayer IDs distintos da execução (run_id) atual já
+        marcados como elegíveis pelo filtro de Publish date.
+        """
+
+        query = """
+        SELECT DISTINCT
+
+            v.jwplayer_id
+
+        FROM videos v
+
+        WHERE v.run_id = (
+            SELECT MAX(id) FROM imports
+        )
+
+        AND v.eligible_for_analysis = 1
+        """
+
+        with self.connect() as connection:
+
+            return [
+                row["jwplayer_id"]
+
+                for row in connection.execute(
+                    query
+                )
+            ]
+
+    # ======================================================
     # LISTAR PORTFÓLIO
     # ======================================================
 
@@ -1209,6 +1351,14 @@ class Database:
             v.jwplayer_id,
 
             v.keywords,
+
+            v.publish_date,
+
+            v.filter_status,
+
+            v.filter_reason,
+
+            v.eligible_for_analysis,
 
             a.status,
 

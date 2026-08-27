@@ -1330,6 +1330,72 @@ async function handleSessionExpired(message) {
 }
 
 // ==========================================================
+// FILTRO DE DATA DE PUBLICAÇÃO
+// ==========================================================
+//
+// Controles compartilhados pela planilha e pela análise
+// individual — o mesmo filtro vale para os dois fluxos.
+// Sem o checkbox marcado, min_publish_date vai vazio e o
+// backend trata como "sem filtro" (todo vídeo elegível).
+
+function getPublishDateFilter() {
+    const enabled =
+        $('#enable-publish-filter')?.checked ||
+        false;
+
+    const dateValue =
+        $('#min-publish-date')?.value ||
+        '';
+
+    const includeMissingDate =
+        $('#include-missing-date')?.checked ||
+        false;
+
+    return {
+        min_publish_date:
+            enabled ? dateValue : '',
+
+        include_missing_date:
+            includeMissingDate
+    };
+}
+
+function renderFilterSummary(filter) {
+    const container =
+        $('#filter-summary');
+
+    if (!container || !filter) {
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="alert alert-success">
+            <strong>${escapeHtml(filter.total)} vídeo(s) verificado(s)</strong><br>
+
+            ${escapeHtml(filter.eligible)} dentro do período<br>
+            ${escapeHtml(filter.filtered)} anteriores à data mínima<br>
+            ${escapeHtml(filter.no_date)} sem data de publicação<br>
+            ${escapeHtml(filter.errors)} com erro na consulta ao JW Player<br>
+            <br>
+            <strong>
+                ${escapeHtml(filter.will_be_analyzed)}
+                vídeo(s) serão enviados para análise.
+            </strong>
+        </div>
+    `;
+
+    const startButton =
+        $('#start-eligible');
+
+    if (startButton) {
+        startButton.style.display =
+            filter.will_be_analyzed > 0
+                ? ''
+                : 'none';
+    }
+}
+
+// ==========================================================
 // PROCESSAMENTO / UPLOAD DE PLANILHA
 // ==========================================================
 
@@ -1438,9 +1504,36 @@ async function processFile() {
         );
     }
 
+    const publishFilter =
+        getPublishDateFilter();
+
+    formData.append(
+        'min_publish_date',
+        publishFilter.min_publish_date
+    );
+
+    formData.append(
+        'include_missing_date',
+        publishFilter.include_missing_date
+    );
+
     if (importResult) {
         importResult.innerHTML =
-            '<div class="loading">Importando e processando planilha...</div>';
+            '<div class="loading">Importando planilha e consultando datas de publicação no JW Player...</div>';
+    }
+
+    const filterSummaryEl =
+        $('#filter-summary');
+
+    if (filterSummaryEl) {
+        filterSummaryEl.innerHTML = '';
+    }
+
+    const startButton =
+        $('#start-eligible');
+
+    if (startButton) {
+        startButton.style.display = 'none';
     }
 
     try {
@@ -1467,34 +1560,31 @@ async function processFile() {
         if (importResult) {
             importResult.innerHTML = `
                 <div class="alert alert-success">
-                    <strong>Processamento iniciado!</strong><br>
+                    <strong>Planilha importada!</strong><br>
                     Arquivo:
                     ${escapeHtml(
-                        data.filename ||
                         fileInput.files[0].name
                     )}<br>
 
-                    Total de registros:
+                    Vídeos pendentes:
                     ${escapeHtml(
-                        data.total_records ?? 0
-                    )}<br>
-
-                    Jobs criados:
-                    ${escapeHtml(
-                        data.jobs_created ?? 0
+                        data.pending_media ?? 0
                     )}
                 </div>
             `;
         }
 
-        toast(
-            'Planilha importada com sucesso!'
+        renderFilterSummary(
+            data.filter
         );
 
-        resetResultsFilters();
+        toast(
+            'Planilha importada com sucesso! ' +
+            'Revise o resumo abaixo antes de iniciar a análise.'
+        );
+
         loadStats();
         loadVideos();
-        loadJobs();
     } catch (error) {
         if (importResult) {
             importResult.innerHTML = `
@@ -1513,6 +1603,109 @@ async function processFile() {
             );
         }
     }
+}
+
+// ==========================================================
+// INICIAR ANÁLISE (SOMENTE VÍDEOS ELEGÍVEIS)
+// ==========================================================
+
+async function startEligibleAnalysis() {
+    const startButton =
+        $('#start-eligible');
+
+    const providerSelect =
+        $('#provider');
+
+    const modelSelect =
+        $('#ai-model');
+
+    const framesInput =
+        $('#frame-count');
+
+    const analysisModeSelect =
+        $('#analysis-mode');
+
+    const whisperSelect =
+        $('#whisper-model');
+
+    const payload = {
+        provider:
+            providerSelect?.value ||
+            'Gemini',
+
+        model:
+            modelSelect?.value ||
+            providerDefaults.Gemini,
+
+        frame_count:
+            Number(
+                framesInput?.value || 8
+            ),
+
+        analysis_mode:
+            analysisModeSelect?.value ||
+            'frames',
+
+        whisper_model:
+            whisperSelect?.value ||
+            'small'
+    };
+
+    if (startButton) {
+        startButton.disabled = true;
+    }
+
+    try {
+        const result =
+            await api(
+                '/api/start-eligible',
+                {
+                    method: 'POST',
+
+                    headers: {
+                        'Content-Type':
+                            'application/json'
+                    },
+
+                    body:
+                        JSON.stringify(payload)
+                }
+            );
+
+        toast(
+            `Análise iniciada para ${result.media_count ?? 0} vídeo(s) elegível(is).`
+        );
+
+        if (startButton) {
+            startButton.style.display = 'none';
+        }
+
+        resetResultsFilters();
+        loadStats();
+        loadVideos();
+        loadJobs();
+
+        show('processing');
+    } catch (error) {
+        if (isSessionError(error.message)) {
+            await handleSessionExpired(error.message);
+        } else {
+            toast(
+                `Erro ao iniciar análise: ${error.message}`
+            );
+        }
+    } finally {
+        if (startButton) {
+            startButton.disabled = false;
+        }
+    }
+}
+
+if ($('#start-eligible')) {
+    $('#start-eligible').addEventListener(
+        'click',
+        startEligibleAnalysis
+    );
 }
 
 const uploadBtn =
@@ -1791,7 +1984,9 @@ async function analyzeSingleJWPlayer() {
 
         whisper_model:
             whisperSelect?.value ||
-            'small'
+            'small',
+
+        ...getPublishDateFilter()
     };
 
     try {

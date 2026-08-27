@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import requests
 
@@ -13,6 +14,7 @@ class MediaAsset:
     source_url: str | None
     transcript_url: str | None
     thumbnail_track_url: str | None = None
+    publish_date: datetime | None = None
 
 
 class JWPlayerError(RuntimeError):
@@ -52,6 +54,12 @@ class JWPlayerClient:
             (t.get("file") for t in tracks if t.get("file") and str(t.get("kind", "")).lower() in {"captions", "subtitles"}),
             None,
         )
+        pubdate = item.get("pubdate")
+        publish_date = (
+            datetime.fromtimestamp(float(pubdate), tz=timezone.utc)
+            if isinstance(pubdate, (int, float))
+            else None
+        )
         return MediaAsset(
             media_id=media_id,
             title=str(item.get("title") or media_id),
@@ -62,6 +70,7 @@ class JWPlayerClient:
                 (t.get("file") for t in tracks if t.get("file") and str(t.get("kind", "")).lower() == "thumbnails"),
                 None,
             ),
+            publish_date=publish_date,
         )
 
     def download_transcript(self, url: str) -> str:
