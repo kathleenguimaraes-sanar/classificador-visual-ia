@@ -199,6 +199,21 @@ class JWBrowserSession:
                     args=[
                         "--autoplay-policy=no-user-gesture-required",
                         "--disable-blink-features=AutomationControlled",
+                        # Flags de redução de memória para rodar em
+                        # instâncias com pouca RAM (ex.: Render 512MB).
+                        # Não afetam autoplay/captura de vídeo.
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-default-apps",
+                        "--disable-sync",
+                        "--disable-translate",
+                        "--metrics-recording-only",
+                        "--no-first-run",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--mute-audio",
                     ],
                 )
             )

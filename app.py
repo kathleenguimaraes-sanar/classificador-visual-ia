@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import io
 import logging
 import os
@@ -221,6 +222,15 @@ PROCESSOR = ThreadPoolExecutor(
 ANALYSIS_LOCK = threading.Lock()
 
 JOBS: dict[str, dict] = {}
+
+# JOBS nunca era podado individualmente (só era zerado por
+# inteiro quando uma nova planilha substituía um lote ativo).
+# Em uso real — análises individuais e /api/start-eligible, que
+# não passam por essa limpeza — o dicionário crescia sem limite
+# pela vida inteira do processo. Isso mantém só os mais
+# recentes, o suficiente para a Etapa 3/`/api/jobs` (que já só
+# exibe os últimos 100).
+MAX_JOBS_HISTORY = 200
 
 JOBS_LOCK = threading.Lock()
 
@@ -1468,6 +1478,27 @@ def update_job(
             )
 
 
+def _prune_jobs_locked() -> None:
+
+    """
+    Remove as entradas mais antigas de JOBS quando ultrapassa
+    MAX_JOBS_HISTORY. O chamador precisa já estar de posse de
+    JOBS_LOCK — dicts em Python preservam ordem de inserção,
+    então isso remove sempre os jobs criados há mais tempo.
+    """
+
+    while len(JOBS) > MAX_JOBS_HISTORY:
+
+        oldest_job_id = next(
+            iter(JOBS)
+        )
+
+        JOBS.pop(
+            oldest_job_id,
+            None,
+        )
+
+
 # ==========================================================
 # CANCELAR LOTE ATIVO
 # ==========================================================
@@ -2116,6 +2147,13 @@ def _run_media_job_serial(
 
         request.api_key = ""
 
+        # Frames (base64), transcrição e o modelo Whisper usado no
+        # modo híbrido geram picos grandes de memória por vídeo.
+        # Forçar a coleta aqui, ao final de cada job (sucesso ou
+        # falha), evita que esses picos se acumulem entre um vídeo
+        # e o próximo dentro do mesmo processo de vida longa.
+        gc.collect()
+
 
 # ==========================================================
 # ENFILEIRAR JOBS
@@ -2239,6 +2277,8 @@ def enqueue_jobs(
             JOBS[job_id] = (
                 job_data
             )
+
+            _prune_jobs_locked()
 
         PROCESSOR.submit(
 
