@@ -368,6 +368,12 @@ button:disabled {
   gap: 16px;
 }
 
+.export-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .eyebrow {
   color: #075bea;
   font-size: 11px;
@@ -382,7 +388,7 @@ button:disabled {
 
 .filters {
   display: grid;
-  grid-template-columns: 2fr 1fr 1.3fr;
+  grid-template-columns: 2fr 1fr 1fr 1.3fr;
   gap: 10px;
   margin: 16px 0;
 }
@@ -600,6 +606,56 @@ label select {
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
   color: #536473;
+}
+
+/*
+   JWPlayer ID como link:
+   mesma tipografia da célula, com indicação visual de clique.
+*/
+.jwplayer-link {
+  color: #075bea;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.jwplayer-link:hover {
+  text-decoration: underline;
+}
+
+/*
+   Modelo: indica que a célula tem uma explicação disponível
+   (tooltip próprio, cursor "help" como pista visual).
+*/
+.model-cell {
+  cursor: help;
+}
+
+/*
+   Balão do tooltip do Modelo. Fica fora da tabela (anexado ao
+   body, position: fixed) para nunca ser cortado pelo
+   "overflow: auto" de .table-wrap, e é posicionado via JS.
+*/
+.model-tooltip {
+  position: fixed;
+  z-index: 60;
+  max-width: 320px;
+  padding: 8px 12px;
+  background: #253746;
+  color: #fff;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  box-shadow: 0 12px 34px rgba(20, 40, 70, 0.3);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+}
+
+.model-tooltip.show {
+  opacity: 1;
+  visibility: visible;
 }
 
 /*

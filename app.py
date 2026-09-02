@@ -9,19 +9,25 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 
 from src.portfolio.ai import (
     AIError,
     AIResponseError,
+    DEFAULT_TOPIC_CLASSIFICATION,
     analyze_frames,
+    classify_topics,
     validate_ollama_model,
 )
 from src.portfolio.database import Database, utc_now
@@ -290,6 +296,23 @@ app.mount(
 )
 
 
+# StaticFiles não define Cache-Control por padrão. Sem isso, o
+# navegador pode reaproveitar app.js/style.css de uma visita
+# anterior mesmo depois de o arquivo mudar no servidor — a causa
+# real de correções em app.js "não aparecerem" no navegador do
+# usuário. no-cache força revalidação (ETag/Last-Modified) a
+# cada carregamento, sem exigir cache-busting manual na URL.
+@app.middleware("http")
+async def _no_cache_for_assets(request, call_next):
+
+    response = await call_next(request)
+
+    if request.url.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "no-cache"
+
+    return response
+
+
 # ==========================================================
 # MODELOS
 # ==========================================================
@@ -317,7 +340,7 @@ class ProcessRequest(BaseModel):
     # Uso exclusivamente interno.
     api_key: str = ""
 
-    model: str = "gemini-3.6-flash"
+    model: str = "gemini-flash-latest"
 
     ollama_url: str = (
         "http://127.0.0.1:11434"
@@ -357,7 +380,7 @@ class AnalyzeJWPlayerRequest(BaseModel):
 
     provider: str = "Gemini"
 
-    model: str = "gemini-3.6-flash"
+    model: str = "gemini-flash-latest"
 
     ollama_url: str = (
         "http://127.0.0.1:11434"
@@ -382,7 +405,7 @@ class StartEligibleRequest(BaseModel):
 
     provider: str = "Gemini"
 
-    model: str = "gemini-3.6-flash"
+    model: str = "gemini-flash-latest"
 
     ollama_url: str = (
         "http://127.0.0.1:11434"
@@ -396,6 +419,17 @@ class StartEligibleRequest(BaseModel):
         default=8,
         ge=4,
         le=16,
+    )
+
+
+class BackfillClassificationRequest(BaseModel):
+
+    provider: str = "Gemini"
+
+    model: str = "gemini-flash-latest"
+
+    ollama_url: str = (
+        "http://127.0.0.1:11434"
     )
 
 
@@ -480,6 +514,38 @@ def update_current_library(
     ]
 
     return config
+
+
+# ==========================================================
+# LINK DA AULA (JW PLAYER)
+# ==========================================================
+#
+# Mesma regra usada pelo frontend em buildJWPlayerMediaUrl()
+# (web/app.js) — reproduzida aqui para que a exportação
+# CSV/XLSX aponte exatamente para a mesma URL exibida no site.
+# Não existe uma segunda lógica: qualquer mudança nesse formato
+# precisa ser replicada nos dois lugares.
+
+def build_jwplayer_media_url(
+    jwplayer_id: str,
+    property_id: str,
+) -> str:
+
+    jwplayer_id = str(
+        jwplayer_id or ""
+    ).strip()
+
+    property_id = str(
+        property_id or ""
+    ).strip()
+
+    if not jwplayer_id or not property_id:
+        return ""
+
+    return (
+        f"https://dashboard.jwplayer.com/p/{property_id}"
+        f"/media/{quote(jwplayer_id, safe='')}"
+    )
 
 
 # ==========================================================
@@ -677,6 +743,26 @@ def classify_publish_date(
     )
 
 
+def fetch_publish_date_from_dashboard(
+    jwplayer_id: str,
+):
+
+    """
+    Fallback do publish_date: lê o campo "Created" da página de
+    detalhes do vídeo no JW Player (via sessão autenticada), só
+    usado quando o playback.json não trouxe pubdate. Nunca
+    levanta exceção — retorna None se a sessão não estiver
+    conectada ou a data não puder ser lida.
+    """
+
+    try:
+        return JW_SESSION.fetch_created_date(
+            jwplayer_id
+        )
+    except Exception:
+        return None
+
+
 def check_publish_dates(
     jwplayer_ids: list[str],
     site_id: str,
@@ -689,9 +775,13 @@ def check_publish_dates(
     resultado do filtro em `videos`. Um erro individual não
     interrompe os demais vídeos.
 
-    Sem `min_publish_date` configurado, todos os vídeos são
-    marcados elegíveis sem nenhuma chamada ao JW Player — o
-    filtro é opcional, não obrigatório.
+    O Publish date é sempre buscado no JW Player, com ou sem
+    `min_publish_date` configurado — esse campo é usado pelo
+    filtro de ano da tela de resultados e pela exportação, não
+    só pela elegibilidade de processamento. Sem
+    `min_publish_date`, a busca acontece do mesmo jeito, mas
+    nenhum vídeo é bloqueado por causa da data: todos ficam
+    elegíveis (o filtro por data continua opcional).
     """
 
     summary = {
@@ -716,28 +806,6 @@ def check_publish_dates(
         min_publish_date
     )
 
-    if cutoff is None:
-
-        for jwplayer_id in jwplayer_ids:
-
-            DATABASE.update_filter_result(
-                jwplayer_id,
-                publish_date=None,
-                filter_status="eligible",
-                filter_reason="no_filter_applied",
-                eligible_for_analysis=True,
-            )
-
-        summary["eligible"] = len(
-            jwplayer_ids
-        )
-
-        summary["will_be_analyzed"] = len(
-            jwplayer_ids
-        )
-
-        return summary
-
     client = JWPlayerClient(
         site_id=site_id,
         token=JW_DELIVERY_TOKEN,
@@ -751,9 +819,22 @@ def check_publish_dates(
                 jwplayer_id
             )
 
+            publish_date = asset.publish_date
+
+            # Fonte principal (playback.json/pubdate) sem data:
+            # tenta a página de detalhes do vídeo no JW Player
+            # como alternativa, antes de desistir.
+            if publish_date is None:
+
+                publish_date = (
+                    fetch_publish_date_from_dashboard(
+                        jwplayer_id
+                    )
+                )
+
             return (
                 jwplayer_id,
-                asset.publish_date,
+                publish_date,
                 None,
             )
 
@@ -792,10 +873,36 @@ def check_publish_dates(
                 publish_date=None,
                 filter_status="error",
                 filter_reason="publish_date_unavailable",
-                eligible_for_analysis=False,
+                # Sem filtro configurado, um erro ao buscar a
+                # data não deve bloquear o vídeo — só quando há
+                # um min_publish_date de fato para respeitar.
+                eligible_for_analysis=(cutoff is None),
             )
 
             summary["errors"] += 1
+
+            if cutoff is None:
+                summary["eligible"] += 1
+                summary["will_be_analyzed"] += 1
+
+            continue
+
+        if cutoff is None:
+
+            DATABASE.update_filter_result(
+                jwplayer_id,
+                publish_date=(
+                    publish_date.isoformat()
+                    if publish_date
+                    else None
+                ),
+                filter_status="eligible",
+                filter_reason="no_filter_applied",
+                eligible_for_analysis=True,
+            )
+
+            summary["eligible"] += 1
+            summary["will_be_analyzed"] += 1
 
             continue
 
@@ -923,6 +1030,33 @@ def stats():
 # VÍDEOS
 # ==========================================================
 
+def _dedupe_by_jwplayer_id(
+    rows: list[dict],
+) -> list[dict]:
+
+    """
+    O JWPlayer ID é o identificador único do vídeo. A mesma
+    planilha pode trazer o mesmo JWPlayer ID em mais de uma
+    linha (IDs de registro diferentes); mantém apenas a
+    primeira ocorrência de cada JWPlayer ID.
+    """
+
+    seen = set()
+    deduped = []
+
+    for row in rows:
+
+        jwplayer_id = row.get("jwplayer_id")
+
+        if jwplayer_id in seen:
+            continue
+
+        seen.add(jwplayer_id)
+        deduped.append(row)
+
+    return deduped
+
+
 @app.get("/api/videos")
 def videos(
     search: str = "",
@@ -930,7 +1064,9 @@ def videos(
     category: str = "",
 ):
 
-    rows = DATABASE.list_portfolio()
+    rows = _dedupe_by_jwplayer_id(
+        DATABASE.list_portfolio()
+    )
 
     needle = search.casefold().strip()
 
@@ -990,6 +1126,143 @@ def videos(
     return {
         "items": rows,
         "total": len(rows),
+    }
+
+
+# ==========================================================
+# BACKFILL — PUBLISH DATE DE VÍDEOS JÁ ANALISADOS
+# ==========================================================
+#
+# check_publish_dates() só roda, normalmente, para mídia ainda
+# pendente (ver /api/import) — vídeos que já concluíram a
+# análise nunca passavam por ali, mesmo que o publish_date
+# estivesse ausente. Este endpoint busca somente o metadado de
+# publish_date no JW Player para o que estiver faltando na
+# execução atual; não chama IA, não refaz transcrição/resumo,
+# não altera status/summary/final_category em `analyses`.
+
+@app.post("/api/backfill-publish-dates")
+def backfill_publish_dates():
+
+    library = get_current_library()
+
+    rows = _dedupe_by_jwplayer_id(
+        DATABASE.list_portfolio()
+    )
+
+    missing = [
+        row["jwplayer_id"]
+        for row in rows
+        if not row.get("publish_date")
+    ]
+
+    if not missing:
+        return {
+            "checked": 0,
+            "updated": 0,
+            "still_missing": 0,
+        }
+
+    check_publish_dates(
+        missing,
+        site_id=library["property_id"],
+        min_publish_date="",
+    )
+
+    refreshed = {
+        row["jwplayer_id"]: row.get("publish_date")
+        for row in DATABASE.list_portfolio()
+        if row["jwplayer_id"] in set(missing)
+    }
+
+    updated = sum(
+        1
+        for value in refreshed.values()
+        if value
+    )
+
+    return {
+        "checked": len(missing),
+        "updated": updated,
+        "still_missing": len(missing) - updated,
+    }
+
+
+# ==========================================================
+# BACKFILL — CLASSIFICAÇÃO SEMÂNTICA DE VÍDEOS EXISTENTES
+# ==========================================================
+#
+# Classifica (macrotema/microtema/nanotema) vídeos que já
+# concluíram a análise e já têm "Resumo do conteúdo" salvo, mas
+# ainda não passaram pela classificação semântica — cobre TODO o
+# histórico, não só a execução (run_id) atual. Reaproveita o
+# resumo já persistido: não baixa o vídeo, não extrai frames,
+# não chama a IA multimodal novamente.
+
+@app.post("/api/backfill-classification")
+def backfill_classification(
+    request: BackfillClassificationRequest,
+):
+
+    if request.provider not in AVAILABLE_PROVIDERS:
+
+        raise HTTPException(
+            status_code=422,
+            detail=AVAILABLE_PROVIDERS_MESSAGE,
+        )
+
+    api_key = get_provider_api_key(
+        request.provider
+    )
+
+    if request.provider == "Ollama":
+
+        try:
+
+            validate_ollama_model(
+                request.ollama_url,
+                request.model,
+            )
+
+        except AIError as exc:
+
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+            ) from exc
+
+    targets = (
+        DATABASE.media_pending_topic_classification()
+    )
+
+    identified = 0
+
+    for item in targets:
+
+        topics = classify_topics(
+
+            request.provider,
+
+            api_key,
+
+            request.model,
+
+            item["summary"],
+
+            ollama_url=request.ollama_url,
+        )
+
+        DATABASE.update_analysis(
+            item["jwplayer_id"],
+            **topics,
+        )
+
+        if topics != DEFAULT_TOPIC_CLASSIFICATION:
+            identified += 1
+
+    return {
+        "checked": len(targets),
+        "identified": identified,
     }
 
 
@@ -1054,7 +1327,7 @@ async def import_and_process(
     ),
 
     model: str = Form(
-        "gemini-3.6-flash"
+        "gemini-flash-latest"
     ),
 
     ollama_url: str = Form(
@@ -1911,6 +2184,41 @@ def _run_media_job_serial(
         )
 
         # --------------------------------------------------
+        # CLASSIFICAÇÃO SEMÂNTICA (MACRO/MICRO/NANOTEMA)
+        # --------------------------------------------------
+        #
+        # Etapa separada, a partir do resumo já gerado acima —
+        # não reenvia frames nem reprocessa o vídeo. Nunca
+        # levanta exceção (classify_topics já trata falhas
+        # internamente), então não pode pausar o lote nem
+        # marcar este vídeo como erro.
+
+        update_job(
+
+            job_id,
+
+            stage="Classificando tema",
+
+            message=(
+                "Identificando macrotema, "
+                "microtema e nanotema"
+            ),
+        )
+
+        topics = classify_topics(
+
+            request.provider,
+
+            request.api_key,
+
+            request.model,
+
+            result["summary"],
+
+            ollama_url=request.ollama_url,
+        )
+
+        # --------------------------------------------------
         # SALVAR RESULTADO
         # --------------------------------------------------
 
@@ -1951,6 +2259,18 @@ def _run_media_job_serial(
             analyzed_at=utc_now(),
 
             error_message=None,
+
+            macrotema=topics[
+                "macrotema"
+            ],
+
+            microtema=topics[
+                "microtema"
+            ],
+
+            nanotema=topics[
+                "nanotema"
+            ],
         )
 
         update_job(
@@ -1968,6 +2288,8 @@ def _run_media_job_serial(
             result={
 
                 **result,
+
+                **topics,
 
                 "title":
                     title,
@@ -2632,67 +2954,178 @@ def validate(
 # EXPORTAÇÃO CSV
 # ==========================================================
 
-def _rows_for_csv_export() -> list[dict]:
+def _publish_date_year(value) -> int | None:
 
-    rows = []
+    """
+    O publish_date é armazenado como ISO 8601 (podendo conter
+    horário e timezone, ex.: 2025-05-13T11:00:18+00:00). Extrai
+    apenas o ano, sem alterar/descartar o valor original.
+    """
 
-    for row in DATABASE.list_portfolio():
+    text = str(
+        value or ""
+    ).strip()
 
-        row = dict(row)
+    if not text:
+        return None
 
-        eligible = row.get(
-            "eligible_for_analysis"
+    normalized = (
+        text[:-1] + "+00:00"
+        if text.endswith("Z")
+        else text
+    )
+
+    try:
+        return datetime.fromisoformat(
+            normalized
+        ).year
+    except ValueError:
+        pass
+
+    try:
+        return date.fromisoformat(
+            text[:10]
+        ).year
+    except ValueError:
+        return None
+
+
+# Fonte única do "ano de publicação": usada pelo filtro da tela
+# (via /api/videos + publishDateYear() em app.js), pela
+# exportação CSV, pela exportação XLSX e pelo resumo por ano —
+# nenhuma dessas quatro pontas reimplementa a extração do ano.
+#
+# Ordem e nomes das colunas seguem a especificação de
+# exportação (planilha de referência). Não existe coluna própria
+# para o link da aula: no XLSX, a própria célula "JWPlayer ID"
+# recebe o hyperlink (ver export_xlsx) — mesma regra do site,
+# via build_jwplayer_media_url().
+EXPORT_COLUMNS = (
+    ("lesson_name", "Nome da aula"),
+    ("final_category", "Modelo de aula"),
+    ("professor_name", "Professor"),
+    ("summary", "Resumo do conteúdo"),
+    ("jwplayer_id", "JWPlayer ID"),
+    ("status", "Status"),
+    ("validation_status", "Validação Manual"),
+    ("confidence", "Confiança"),
+    ("keywords", "Palavras-chave"),
+    ("publish_year", "Ano de publicação"),
+    ("macrotema", "Macrotema"),
+    ("microtema", "Microtema"),
+    ("nanotema", "Nanotema"),
+)
+
+
+def _rows_for_export(
+    year: str = "",
+) -> list[dict]:
+
+    """
+    Fonte única de linhas para CSV e XLSX:
+    - dedupe por JWPlayer ID (identificador único do vídeo);
+    - somente status "Concluído";
+    - ano de publicação calculado uma única vez por linha, com
+      a mesma lógica usada no filtro da tela
+      (_publish_date_year), reaproveitado tanto para o valor
+      exportado quanto para o resumo por ano.
+    """
+
+    rows = _dedupe_by_jwplayer_id(
+        DATABASE.list_portfolio()
+    )
+
+    # Regra obrigatória: a exportação só pode conter aulas com
+    # status "Concluído" — o filtro é aplicado antes de gerar
+    # o arquivo, independente de outros filtros da tela.
+    rows = [
+        dict(row)
+        for row in rows
+        if row.get("status") == "Concluído"
+    ]
+
+    library = get_current_library()
+
+    for row in rows:
+
+        export_year = _publish_date_year(
+            row.get("publish_date")
         )
 
-        row["eligible_for_analysis"] = (
-            "SIM"
-            if eligible == 1
-            else "NÃO"
-            if eligible == 0
+        row["_export_year"] = export_year
+
+        row["publish_year"] = (
+            str(export_year)
+            if export_year is not None
             else ""
         )
 
-        rows.append(row)
+        # Mesma regra de link usada pelo site
+        # (buildJWPlayerMediaUrl em web/app.js), guardada aqui
+        # como campo interno (não é uma coluna de EXPORT_COLUMNS):
+        # usada só pelo XLSX para aplicar o hyperlink diretamente
+        # na célula "JWPlayer ID" — ver export_xlsx(). Se não for
+        # possível gerar a URL, fica vazio sem interromper a
+        # exportação dos demais registros.
+        try:
+
+            row["_jwplayer_link"] = build_jwplayer_media_url(
+                row.get("jwplayer_id"),
+                library["property_id"],
+            )
+
+        except Exception:
+
+            logger.warning(
+                "Falha ao gerar o link do JWPlayer ID na "
+                "exportação | jwplayer_id=%s",
+                row.get("jwplayer_id"),
+            )
+
+            row["_jwplayer_link"] = ""
+
+        for field in (
+            "macrotema",
+            "microtema",
+            "nanotema",
+        ):
+
+            row[field] = (
+                row.get(field)
+                or "Não identificado"
+            )
+
+    year = str(
+        year or ""
+    ).strip()
+
+    if year:
+
+        try:
+            year_number = int(year)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Ano de publicação inválido."
+                ),
+            )
+
+        rows = [
+            row
+            for row in rows
+            if row["_export_year"] == year_number
+        ]
 
     return rows
 
 
 @app.get("/api/export.csv")
-def export_csv():
+def export_csv(year: str = ""):
 
     output = io.StringIO()
 
-    fields = [
-
-        "lesson_name",
-
-        "final_category",
-
-        "professor_name",
-
-        "summary",
-
-        "jwplayer_id",
-
-        "duration",
-
-        "status",
-
-        "validation_status",
-
-        "confidence",
-
-        "keywords",
-
-        "publish_date",
-
-        "filter_status",
-
-        "eligible_for_analysis",
-
-        "filter_reason",
-
-    ]
+    fields = [key for key, _ in EXPORT_COLUMNS]
 
     writer = csv.DictWriter(
 
@@ -2703,53 +3136,12 @@ def export_csv():
         extrasaction="ignore",
     )
 
-    writer.writerow({
-
-        "lesson_name":
-            "Nome da aula",
-
-        "final_category":
-            "Modelo de aula",
-
-        "professor_name":
-            "Professor",
-
-        "summary":
-            "Resumo do conteúdo",
-
-        "jwplayer_id":
-            "JWPlayer ID",
-
-        "duration":
-            "Duração",
-
-        "status":
-            "Status",
-
-        "validation_status":
-            "Validação",
-
-        "confidence":
-            "Confiança",
-
-        "keywords":
-            "Palavras-chave",
-
-        "publish_date":
-            "Publish date",
-
-        "filter_status":
-            "Filtro de data",
-
-        "eligible_for_analysis":
-            "Elegível para análise",
-
-        "filter_reason":
-            "Motivo do filtro",
-    })
+    writer.writerow(
+        dict(EXPORT_COLUMNS)
+    )
 
     writer.writerows(
-        _rows_for_csv_export()
+        _rows_for_export(year=year)
     )
 
     return Response(
@@ -2770,6 +3162,133 @@ def export_csv():
                     'attachment; '
                     'filename='
                     '"portfolio_cetrus.csv"'
+                )
+        },
+    )
+
+
+@app.get("/api/export.xlsx")
+def export_xlsx():
+
+    rows = _rows_for_export()
+
+    workbook = Workbook()
+
+    videos_sheet = workbook.active
+    videos_sheet.title = "Vídeos"
+
+    videos_sheet.append(
+        [label for _, label in EXPORT_COLUMNS]
+    )
+
+    jwplayer_id_column = (
+        [key for key, _ in EXPORT_COLUMNS].index(
+            "jwplayer_id"
+        )
+        + 1
+    )
+
+    for row in rows:
+
+        videos_sheet.append([
+
+            row["_export_year"]
+            if key == "publish_year"
+            else row.get(key, "")
+
+            for key, _ in EXPORT_COLUMNS
+
+        ])
+
+        # A própria célula "JWPlayer ID" recebe o hyperlink —
+        # não existe coluna separada de link. O texto exibido
+        # continua sendo somente o JWPlayer ID (já preenchido
+        # pelo append acima); aponta para a mesma URL usada pelo
+        # site — ver build_jwplayer_media_url().
+        link_url = row.get(
+            "_jwplayer_link"
+        )
+
+        if link_url:
+
+            link_cell = videos_sheet.cell(
+                row=videos_sheet.max_row,
+                column=jwplayer_id_column,
+            )
+
+            link_cell.hyperlink = link_url
+
+            link_cell.font = Font(
+                color="0563C1",
+                underline="single",
+            )
+
+    last_column = get_column_letter(
+        len(EXPORT_COLUMNS)
+    )
+
+    videos_sheet.auto_filter.ref = (
+        f"A1:{last_column}{len(rows) + 1}"
+    )
+
+    summary_sheet = workbook.create_sheet(
+        "Resumo por ano"
+    )
+
+    summary_sheet.append(
+        ["Ano de publicação", "Total de vídeos"]
+    )
+
+    counts: dict[str, int] = {}
+
+    for row in rows:
+
+        export_year = row["_export_year"]
+
+        label = (
+            str(export_year)
+            if export_year is not None
+            else "Não informado"
+        )
+
+        counts[label] = (
+            counts.get(label, 0) + 1
+        )
+
+    def _summary_sort_key(label: str):
+        return (
+            (0, int(label))
+            if label.isdigit()
+            else (1, label)
+        )
+
+    for label in sorted(
+        counts,
+        key=_summary_sort_key,
+    ):
+        summary_sheet.append(
+            [label, counts[label]]
+        )
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    return Response(
+
+        content=buffer.getvalue(),
+
+        media_type=(
+            "application/vnd.openxmlformats-officedocument"
+            ".spreadsheetml.sheet"
+        ),
+
+        headers={
+
+            "Content-Disposition":
+                (
+                    'attachment; '
+                    'filename='
+                    '"portfolio_cetrus.xlsx"'
                 )
         },
     )

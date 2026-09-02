@@ -508,11 +508,30 @@ class Database:
                 "ALTER TABLE analyses ADD COLUMN professor_name TEXT"
             )
 
+        for column in (
+            "macrotema",
+            "microtema",
+            "nanotema",
+        ):
+
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE analyses ADD COLUMN {column} TEXT"
+                )
+
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS
             idx_analyses_professor
             ON analyses(professor_name)
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_analyses_macrotema
+            ON analyses(macrotema)
             """
         )
 
@@ -1382,7 +1401,13 @@ class Database:
 
             a.analyzed_at,
 
-            a.error_message
+            a.error_message,
+
+            a.macrotema,
+
+            a.microtema,
+
+            a.nanotema
 
         FROM videos v
 
@@ -1502,6 +1527,9 @@ class Database:
             "duration",
             "error_message",
             "analyzed_at",
+            "macrotema",
+            "microtema",
+            "nanotema",
         }
 
         clean = {
@@ -2011,7 +2039,13 @@ class Database:
 
             a.analyzed_at,
 
-            a.error_message
+            a.error_message,
+
+            a.macrotema,
+
+            a.microtema,
+
+            a.nanotema
 
         FROM videos v
 
@@ -2086,4 +2120,45 @@ class Database:
                 dict(row)
 
                 for row in rows
+            ]
+
+    # ======================================================
+    # BACKFILL — CLASSIFICAÇÃO SEMÂNTICA
+    # ======================================================
+    #
+    # Vídeos já concluídos, com "Resumo do conteúdo" salvo, que
+    # ainda não passaram pela classificação (macrotema NULL).
+    # Usada pelo backfill: NÃO baixa nem reprocessa o vídeo —
+    # apenas reaproveita o resumo já persistido em `analyses`.
+
+    def media_pending_topic_classification(
+        self,
+    ) -> list[dict]:
+
+        query = """
+        SELECT
+
+            jwplayer_id,
+
+            summary
+
+        FROM analyses
+
+        WHERE status = 'Concluído'
+
+          AND summary IS NOT NULL
+
+          AND TRIM(summary) != ''
+
+          AND macrotema IS NULL
+        """
+
+        with self.connect() as connection:
+
+            return [
+                dict(row)
+
+                for row in connection.execute(
+                    query
+                )
             ]

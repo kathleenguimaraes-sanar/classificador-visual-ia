@@ -51,12 +51,46 @@ const jwLibraries = {
 };
 
 // ==========================================================
+// ESPECIFICAÇÃO DOS MODELOS DE AULA
+// ==========================================================
+
+const MODEL_SPECIFICATIONS = {
+    'Teórica core':
+        'Modelo/classificação utilizada para identificar ' +
+        'aulas predominantemente teóricas.',
+
+    'Teórica apenas slide':
+        'Aula teórica assíncrona, gravada com áudio do ' +
+        'professor e a tela do slide.',
+
+    Demonstrativo:
+        'Aula prática, demonstração de exame em paciente, ' +
+        'professor mostrando o exame.',
+
+    'Teórica core + demonstrativo':
+        'Aula que alterna entre aula teórica core e ' +
+        'demonstrativo.'
+};
+
+// Índice normalizado (sem espaços nas pontas, minúsculo) para
+// que pequenas diferenças de formatação/capitalização vindas da
+// API não impeçam a identificação da especificação.
+const MODEL_SPECIFICATIONS_BY_KEY = Object.fromEntries(
+    Object.entries(MODEL_SPECIFICATIONS).map(
+        ([name, specification]) => [
+            name.trim().toLowerCase(),
+            specification
+        ]
+    )
+);
+
+// ==========================================================
 // CONFIGURAÇÃO DOS PROVEDORES DE IA
 // ==========================================================
 
 const providerDefaults = {
     Claude: 'claude-sonnet-4-5',
-    Gemini: 'gemini-3.6-flash',
+    Gemini: 'gemini-flash-latest',
     Ollama: 'llava:7b'
 };
 
@@ -746,6 +780,137 @@ function buildDetailText(video) {
 }
 
 // ==========================================================
+// TOOLTIP DO MODELO DE AULA
+// ==========================================================
+
+function buildModelTooltip(modelName) {
+    const key = String(modelName || '')
+        .trim()
+        .toLowerCase();
+
+    const specification = MODEL_SPECIFICATIONS_BY_KEY[key];
+
+    return specification
+        ? `Modelo: ${specification}`
+        : '';
+}
+
+// O atributo title nativo depende do tooltip do sistema
+// operacional (atraso variável, pode ficar atrás de outros
+// elementos, não é confiável em todos os navegadores/telas
+// sensíveis ao toque). Para garantir que o tooltip realmente
+// apareça, é desenhado aqui um balão próprio, posicionado via
+// JS e anexado ao <body> — assim ele nunca é cortado pelo
+// "overflow: auto" da tabela rolável (.table-wrap).
+const modelTooltipElement = document.createElement('div');
+modelTooltipElement.className = 'model-tooltip';
+modelTooltipElement.setAttribute('role', 'tooltip');
+document.body.appendChild(modelTooltipElement);
+
+function positionModelTooltip(cell) {
+    const cellRect = cell.getBoundingClientRect();
+
+    modelTooltipElement.style.left = `${cellRect.left}px`;
+    modelTooltipElement.style.top = `${cellRect.bottom + 6}px`;
+
+    const tooltipRect =
+        modelTooltipElement.getBoundingClientRect();
+
+    if (tooltipRect.right > window.innerWidth - 8) {
+        modelTooltipElement.style.left =
+            `${Math.max(8, window.innerWidth - tooltipRect.width - 8)}px`;
+    }
+
+    if (tooltipRect.bottom > window.innerHeight - 8) {
+        modelTooltipElement.style.top =
+            `${cellRect.top - tooltipRect.height - 6}px`;
+    }
+}
+
+function showModelTooltip(cell) {
+    const text = cell.dataset.tooltip;
+
+    if (!text) {
+        return;
+    }
+
+    modelTooltipElement.textContent = text;
+    modelTooltipElement.classList.add('show');
+    positionModelTooltip(cell);
+}
+
+function hideModelTooltip() {
+    modelTooltipElement.classList.remove('show');
+}
+
+if ($('#videos')) {
+    const videosBody = $('#videos');
+
+    videosBody.addEventListener('mouseover', (event) => {
+        const cell = event.target.closest('.model-cell');
+
+        if (!cell) {
+            return;
+        }
+
+        showModelTooltip(cell);
+    });
+
+    videosBody.addEventListener('mouseout', (event) => {
+        const cell = event.target.closest('.model-cell');
+
+        if (!cell) {
+            return;
+        }
+
+        if (
+            event.relatedTarget &&
+            cell.contains(event.relatedTarget)
+        ) {
+            return;
+        }
+
+        hideModelTooltip();
+    });
+
+    // Toque/clique: sem hover, o balão acima não aparece — o
+    // toast (já usado no restante do projeto) garante acesso à
+    // mesma especificação em telas sensíveis ao toque.
+    videosBody.addEventListener('click', (event) => {
+        const cell = event.target.closest('.model-cell');
+
+        if (!cell || !cell.dataset.tooltip) {
+            return;
+        }
+
+        toast(cell.dataset.tooltip);
+    });
+}
+
+if ($('.table-wrap')) {
+    $('.table-wrap').addEventListener(
+        'scroll',
+        hideModelTooltip
+    );
+}
+
+// ==========================================================
+// LINK DO VÍDEO NO JW PLAYER
+// ==========================================================
+
+function buildJWPlayerMediaUrl(jwplayerId) {
+    const propertyId =
+        getSelectedJWLibrary()?.propertyId ||
+        state.jwPropertyId ||
+        jwLibraries[DEFAULT_JW_LIBRARY].propertyId;
+
+    return (
+        `https://dashboard.jwplayer.com/p/${propertyId}` +
+        `/media/${encodeURIComponent(jwplayerId)}`
+    );
+}
+
+// ==========================================================
 // VÍDEOS
 // ==========================================================
 
@@ -755,12 +920,17 @@ function buildDetailText(video) {
 // modelo deixado de uma execução anterior poderia esconder
 // os resultados da execução atual, parecendo lista vazia.
 function resetResultsFilters() {
-    const search = $('#search');
+    const professorFilter = $('#professor-filter');
+    const yearFilter = $('#year-filter');
     const statusFilter = $('#status-filter');
     const categoryFilter = $('#category-filter');
 
-    if (search) {
-        search.value = '';
+    if (professorFilter) {
+        professorFilter.value = '';
+    }
+
+    if (yearFilter) {
+        yearFilter.value = '';
     }
 
     if (statusFilter) {
@@ -772,58 +942,31 @@ function resetResultsFilters() {
     }
 }
 
-async function loadVideos() {
-    const search = $('#search');
-    const statusFilter = $('#status-filter');
-    const categoryFilter = $('#category-filter');
+let loadedVideos = [];
 
-    if (
-        !search ||
-        !statusFilter ||
-        !categoryFilter
-    ) {
+function renderVideos(items) {
+    const resultCount =
+        $('#result-count');
+
+    const videos =
+        $('#videos');
+
+    if (resultCount) {
+        resultCount.textContent =
+            `${items.length} registro(s)`;
+    }
+
+    if (!videos) {
         return;
     }
 
-    const query = new URLSearchParams({
-        search: search.value || '',
-        status: statusFilter.value || '',
-        category: categoryFilter.value || ''
-    });
+    videos.innerHTML = items
+        .map(
+            (video) => {
+                const detailText =
+                    buildDetailText(video);
 
-    try {
-        const data =
-            await api(
-                `/api/videos?${query.toString()}`
-            );
-
-        const resultCount =
-            $('#result-count');
-
-        const videos =
-            $('#videos');
-
-        if (resultCount) {
-            resultCount.textContent =
-                `${data.total || 0} registro(s)`;
-        }
-
-        if (!videos) {
-            return;
-        }
-
-        const items =
-            Array.isArray(data.items)
-                ? data.items
-                : [];
-
-        videos.innerHTML = items
-            .map(
-                (video) => {
-                    const detailText =
-                        buildDetailText(video);
-
-                    return `
+                return `
                     <tr>
                         <td>
                             ${escapeHtml(
@@ -840,7 +983,15 @@ async function loadVideos() {
                             )}
                         </td>
 
-                        <td>
+                        <td
+                            class="model-cell"
+                            data-tooltip="${escapeHtml(
+                                buildModelTooltip(
+                                    video.final_category ||
+                                    video.category
+                                )
+                            )}"
+                        >
                             ${escapeHtml(
                                 video.final_category ||
                                 video.category ||
@@ -886,15 +1037,177 @@ async function loadVideos() {
 
                         <td>
                             ${escapeHtml(
-                                video.jwplayer_id ||
-                                '—'
+                                video.macrotema ||
+                                'Não identificado'
                             )}
+                        </td>
+
+                        <td>
+                            ${escapeHtml(
+                                video.microtema ||
+                                'Não identificado'
+                            )}
+                        </td>
+
+                        <td>
+                            ${escapeHtml(
+                                video.nanotema ||
+                                'Não identificado'
+                            )}
+                        </td>
+
+                        <td>
+                            ${video.jwplayer_id
+                                ? `<a
+                                    class="jwplayer-link"
+                                    href="${escapeHtml(
+                                        buildJWPlayerMediaUrl(
+                                            video.jwplayer_id
+                                        )
+                                    )}"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >${escapeHtml(
+                                    video.jwplayer_id
+                                )}</a>`
+                                : '—'
+                            }
                         </td>
                     </tr>
                 `;
-                }
-            )
-            .join('');
+            }
+        )
+        .join('');
+}
+
+function publishDateYear(value) {
+    const match = String(value || '').match(
+        /^(\d{4})-\d{2}-\d{2}/
+    );
+
+    return match
+        ? Number(match[1])
+        : null;
+}
+
+const MIN_YEAR_FILTER = 2016;
+
+function populateYearFilterOptions() {
+    const yearFilter = $('#year-filter');
+
+    if (!yearFilter) {
+        return;
+    }
+
+    const currentYear = new Date().getFullYear();
+
+    const maxYear = loadedVideos.reduce(
+        (max, video) => {
+            const year = publishDateYear(
+                video.publish_date
+            );
+
+            return year && year > max
+                ? year
+                : max;
+        },
+        currentYear
+    );
+
+    const previousValue = yearFilter.value;
+
+    const options = ['<option value="">Todos os anos</option>'];
+
+    for (
+        let year = MIN_YEAR_FILTER;
+        year <= maxYear;
+        year++
+    ) {
+        options.push(
+            `<option value="${year}">${year}</option>`
+        );
+    }
+
+    yearFilter.innerHTML = options.join('');
+    yearFilter.value = previousValue;
+}
+
+function updateExportCsvLink() {
+    const link = $('#download-csv');
+
+    if (!link) {
+        return;
+    }
+
+    const yearFilter = $('#year-filter');
+    const year = yearFilter ? yearFilter.value : '';
+
+    link.href = year
+        ? `/api/export.csv?year=${encodeURIComponent(year)}`
+        : '/api/export.csv';
+}
+
+function applyResultFilters() {
+    const professorFilter = $('#professor-filter');
+    const yearFilter = $('#year-filter');
+
+    const needle =
+        professorFilter
+            ? professorFilter.value.trim().toLowerCase()
+            : '';
+
+    const year = yearFilter
+        ? yearFilter.value
+        : '';
+
+    const items = loadedVideos.filter((video) => {
+        const matchesProfessor =
+            !needle ||
+            (video.professor_name || '')
+                .toLowerCase()
+                .includes(needle);
+
+        const matchesYear =
+            !year ||
+            publishDateYear(video.publish_date) ===
+                Number(year);
+
+        return matchesProfessor && matchesYear;
+    });
+
+    renderVideos(items);
+    updateExportCsvLink();
+}
+
+async function loadVideos() {
+    const statusFilter = $('#status-filter');
+    const categoryFilter = $('#category-filter');
+
+    if (
+        !statusFilter ||
+        !categoryFilter
+    ) {
+        return;
+    }
+
+    const query = new URLSearchParams({
+        status: statusFilter.value || '',
+        category: categoryFilter.value || ''
+    });
+
+    try {
+        const data =
+            await api(
+                `/api/videos?${query.toString()}`
+            );
+
+        loadedVideos =
+            Array.isArray(data.items)
+                ? data.items
+                : [];
+
+        populateYearFilterOptions();
+        applyResultFilters();
     } catch (error) {
         console.error(
             'Erro ao carregar vídeos:',
@@ -907,19 +1220,17 @@ async function loadVideos() {
 // FILTROS
 // ==========================================================
 
-let searchDelay = null;
-
-if ($('#search')) {
-    $('#search').addEventListener(
+if ($('#professor-filter')) {
+    $('#professor-filter').addEventListener(
         'input',
-        () => {
-            clearTimeout(searchDelay);
+        applyResultFilters
+    );
+}
 
-            searchDelay = setTimeout(
-                loadVideos,
-                250
-            );
-        }
+if ($('#year-filter')) {
+    $('#year-filter').addEventListener(
+        'change',
+        applyResultFilters
     );
 }
 

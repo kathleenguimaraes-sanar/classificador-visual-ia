@@ -85,6 +85,103 @@ class DatabaseTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    # TESTE 7 — Persistência de macrotema/microtema/nanotema.
+    def test_topic_classification_is_persisted_and_readable(self):
+        path = Path("tests/.test_topic_classification.db")
+        path.unlink(missing_ok=True)
+        try:
+            database = Database(path)
+            database.import_rows(
+                [{"record_id": "1", "lesson_name": "A", "jwplayer_id": "Ab12Cd34", "keywords": ""}],
+                "base.xlsx",
+            )
+
+            database.update_analysis(
+                "Ab12Cd34",
+                status="Concluído",
+                summary="Resumo sobre insuficiência cardíaca.",
+                macrotema="Cardiologia",
+                microtema="Insuficiência cardíaca",
+                nanotema="Medicamentos",
+            )
+
+            portfolio = database.list_portfolio()
+            self.assertEqual(portfolio[0]["macrotema"], "Cardiologia")
+            self.assertEqual(portfolio[0]["microtema"], "Insuficiência cardíaca")
+            self.assertEqual(portfolio[0]["nanotema"], "Medicamentos")
+
+            media = database.get_media("Ab12Cd34")
+            self.assertEqual(media["macrotema"], "Cardiologia")
+            self.assertEqual(media["microtema"], "Insuficiência cardíaca")
+            self.assertEqual(media["nanotema"], "Medicamentos")
+        finally:
+            path.unlink(missing_ok=True)
+
+    # Registros antigos (sem classificação) continuam funcionando: os
+    # campos ficam None em vez de quebrar list_portfolio()/get_media().
+    def test_video_without_topic_classification_keeps_working(self):
+        path = Path("tests/.test_topic_classification_legacy.db")
+        path.unlink(missing_ok=True)
+        try:
+            database = Database(path)
+            database.import_rows(
+                [{"record_id": "1", "lesson_name": "A", "jwplayer_id": "Ab12Cd34", "keywords": ""}],
+                "base.xlsx",
+            )
+            database.update_analysis(
+                "Ab12Cd34", status="Concluído", summary="Resumo antigo."
+            )
+
+            portfolio = database.list_portfolio()
+            self.assertIsNone(portfolio[0]["macrotema"])
+            self.assertIsNone(portfolio[0]["microtema"])
+            self.assertIsNone(portfolio[0]["nanotema"])
+        finally:
+            path.unlink(missing_ok=True)
+
+    # TESTE 12 (backfill) — vídeos concluídos com resumo mas sem
+    # classificação aparecem na fila de backfill; vídeos já
+    # classificados ou sem resumo não aparecem.
+    def test_media_pending_topic_classification(self):
+        path = Path("tests/.test_topic_backfill.db")
+        path.unlink(missing_ok=True)
+        try:
+            database = Database(path)
+            database.import_rows(
+                [
+                    {"record_id": "1", "lesson_name": "A", "jwplayer_id": "Ab12Cd34", "keywords": ""},
+                    {"record_id": "2", "lesson_name": "B", "jwplayer_id": "Ef56Gh78", "keywords": ""},
+                    {"record_id": "3", "lesson_name": "C", "jwplayer_id": "Ij90Kl12", "keywords": ""},
+                ],
+                "base.xlsx",
+            )
+
+            # Já classificado: não deve entrar no backfill.
+            database.update_analysis(
+                "Ab12Cd34",
+                status="Concluído",
+                summary="Resumo A",
+                macrotema="Cardiologia",
+                microtema="Insuficiência cardíaca",
+                nanotema="Medicamentos",
+            )
+
+            # Concluído, com resumo, ainda sem classificação: deve
+            # entrar no backfill.
+            database.update_analysis(
+                "Ef56Gh78", status="Concluído", summary="Resumo B"
+            )
+
+            # Ainda pendente (sem resumo): não deve entrar no backfill.
+            database.update_analysis("Ij90Kl12", status="Pendente")
+
+            pending = database.media_pending_topic_classification()
+            self.assertEqual(
+                [item["jwplayer_id"] for item in pending], ["Ef56Gh78"]
+            )
+        finally:
+            path.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()

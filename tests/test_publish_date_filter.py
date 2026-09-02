@@ -68,15 +68,73 @@ class CheckPublishDatesTests(unittest.TestCase):
         for wal in Path("tests").glob(".test_publish_date_filter.db-*"):
             wal.unlink(missing_ok=True)
 
-    def test_no_cutoff_marks_everyone_eligible_without_querying_jw(self):
+    def test_no_cutoff_still_fetches_and_stores_publish_date(self):
+        # Regressão: sem min_publish_date, o publish_date precisa
+        # continuar sendo buscado e salvo (usado pelo filtro de
+        # ano da tela e pela exportação) — só a elegibilidade é
+        # que não depende da data.
         app_module.DATABASE.import_rows(
             [{"record_id": "r1", "lesson_name": "A", "jwplayer_id": "AAA11111", "keywords": ""}],
             "planilha.xlsx", replace=False,
         )
-        with patch.object(app_module.JWPlayerClient, "playback") as mock_playback:
+        with patch.object(
+            app_module.JWPlayerClient, "playback",
+            return_value=make_asset("AAA11111", datetime(2023, 5, 1, tzinfo=timezone.utc)),
+        ) as mock_playback:
             summary = app_module.check_publish_dates(["AAA11111"], "XdfUPSCL", "", False)
-            mock_playback.assert_not_called()
+            mock_playback.assert_called_once()
+
         self.assertEqual(summary, {"total": 1, "eligible": 1, "filtered": 0, "no_date": 0, "errors": 0, "will_be_analyzed": 1})
+
+        rows = {r["jwplayer_id"]: r for r in app_module.DATABASE.list_portfolio()}
+        self.assertEqual(rows["AAA11111"]["publish_date"], "2023-05-01T00:00:00+00:00")
+
+    def test_no_cutoff_stays_eligible_even_if_fetch_fails(self):
+        app_module.DATABASE.import_rows(
+            [{"record_id": "r1", "lesson_name": "A", "jwplayer_id": "ERR22222", "keywords": ""}],
+            "planilha.xlsx", replace=False,
+        )
+        with patch.object(
+            app_module.JWPlayerClient, "playback",
+            side_effect=JWPlayerError("Mídia não encontrada nessa propriedade JW Player."),
+        ):
+            summary = app_module.check_publish_dates(["ERR22222"], "XdfUPSCL", "", False)
+
+        self.assertEqual(summary["errors"], 1)
+        self.assertEqual(summary["eligible"], 1)
+        self.assertEqual(summary["will_be_analyzed"], 1)
+
+    def test_falls_back_to_dashboard_when_playback_has_no_pubdate(self):
+        app_module.DATABASE.import_rows(
+            [{"record_id": "r1", "lesson_name": "A", "jwplayer_id": "NOPUB111", "keywords": ""}],
+            "planilha.xlsx", replace=False,
+        )
+        with patch.object(
+            app_module.JWPlayerClient, "playback",
+            return_value=make_asset("NOPUB111", None),
+        ), patch.object(
+            app_module, "fetch_publish_date_from_dashboard",
+            return_value=datetime(2022, 7, 4, tzinfo=timezone.utc),
+        ) as mock_fallback:
+            app_module.check_publish_dates(["NOPUB111"], "XdfUPSCL", "", False)
+            mock_fallback.assert_called_once_with("NOPUB111")
+
+        rows = {r["jwplayer_id"]: r for r in app_module.DATABASE.list_portfolio()}
+        self.assertEqual(rows["NOPUB111"]["publish_date"], "2022-07-04T00:00:00+00:00")
+
+    def test_no_dashboard_fallback_when_playback_already_has_pubdate(self):
+        app_module.DATABASE.import_rows(
+            [{"record_id": "r1", "lesson_name": "A", "jwplayer_id": "HASPUB11", "keywords": ""}],
+            "planilha.xlsx", replace=False,
+        )
+        with patch.object(
+            app_module.JWPlayerClient, "playback",
+            return_value=make_asset("HASPUB11", datetime(2024, 2, 2, tzinfo=timezone.utc)),
+        ), patch.object(
+            app_module, "fetch_publish_date_from_dashboard",
+        ) as mock_fallback:
+            app_module.check_publish_dates(["HASPUB11"], "XdfUPSCL", "", False)
+            mock_fallback.assert_not_called()
 
     def test_error_on_one_video_does_not_stop_the_others(self):
         app_module.DATABASE.import_rows(
@@ -153,7 +211,7 @@ class IndividualAnalysisRespectsFilterTests(unittest.TestCase):
                     "library": "VIDEOSSANAR",
                     "property_id": "XdfUPSCL",
                     "provider": "Gemini",
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-flash-latest",
                     "min_publish_date": "2024-01-01",
                     "include_missing_date": False,
                 },
@@ -177,7 +235,7 @@ class IndividualAnalysisRespectsFilterTests(unittest.TestCase):
                     "library": "VIDEOSSANAR",
                     "property_id": "XdfUPSCL",
                     "provider": "Gemini",
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-flash-latest",
                 },
             )
         self.assertEqual(response.status_code, 200)

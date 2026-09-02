@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -8,6 +9,8 @@ import time
 import requests
 
 from .categories import CATEGORIES, CATEGORY_NAMES
+
+logger = logging.getLogger("cetrus.portfolio.ai")
 
 
 class AIError(RuntimeError):
@@ -1164,3 +1167,260 @@ def analyze_with_ollama(
             "",
         )
     )
+
+
+# ==========================================================
+# CLASSIFICAÇÃO SEMÂNTICA (MACROTEMA / MICROTEMA / NANOTEMA)
+# ==========================================================
+#
+# Etapa separada da geração do resumo: usa o "Resumo do
+# conteúdo" já produzido por analyze_frames/parse_result como
+# única evidência, sem reenviar frames nem reprocessar o vídeo.
+# Reaproveita o mesmo dispatcher de provedores (_request_provider_text)
+# usado pela análise visual — chamado aqui sem frames (chamada
+# somente de texto), sem criar uma segunda integração de IA.
+
+DEFAULT_TOPIC_CLASSIFICATION = {
+    "macrotema": "Não identificado",
+    "microtema": "Não identificado",
+    "nanotema": "Não identificado",
+}
+
+
+def classification_prompt(
+    summary: str,
+) -> str:
+
+    return f"""
+Você classifica hierarquicamente aulas médicas Cetrus a partir do
+Resumo do conteúdo abaixo, já gerado por outra etapa do sistema.
+
+Use SOMENTE o resumo como evidência. Não utilize nenhuma outra
+informação e não invente nada que não esteja nele.
+
+Resumo do conteúdo:
+
+{summary}
+
+Identifique três níveis hierárquicos, nesta ordem de raciocínio:
+
+1. Macrotema: a área médica ou conceitual mais ampla da aula
+   (exemplos: Cardiologia, Neurologia, Dermatologia, Cirurgia,
+   Ginecologia, Pediatria, Ortopedia, Vascular, Endocrinologia,
+   Gastroenterologia). Não se limite a esta lista — identifique a
+   área real a partir do conteúdo do resumo, e não apenas a partir
+   destes exemplos.
+
+2. Microtema: o assunto específico dentro do Macrotema (por
+   exemplo, uma doença, condição, procedimento ou tema pontual,
+   como "Insuficiência cardíaca").
+
+3. Nanotema: o aspecto específico da aula sobre esse Microtema
+   (exemplos: Medicamentos, Tratamento, Diagnóstico, Técnica,
+   Procedimento, Exame, Anatomia, Fisiopatologia, Complicações,
+   Conduta, Prevenção, Indicação, Contraindicação).
+
+Regras obrigatórias:
+
+- A classificação é SEMÂNTICA e considera o foco predominante da
+  aula como um todo. Nunca classifique com base em uma palavra ou
+  termo isolado do resumo. Exemplo: se o resumo cita "digoxina",
+  mas o foco real da aula é o tratamento medicamentoso da
+  insuficiência cardíaca em geral, o Nanotema correto é
+  "Medicamentos", e não "Digoxina".
+
+- Os três níveis precisam ser semanticamente coerentes entre si:
+  o Microtema pertence ao Macrotema identificado, e o Nanotema é
+  um aspecto do Microtema identificado. Nunca misture áreas
+  diferentes entre os níveis.
+
+- Quando o resumo não tiver informação suficiente para determinar
+  um nível com segurança, use exatamente "Não identificado" nesse
+  nível. Não invente uma classificação sem evidência suficiente no
+  resumo. Se nem a área principal puder ser identificada, use
+  "Não identificado" nos três níveis.
+
+- Normalize a nomenclatura: use termos curtos, claros, objetivos e
+  no padrão médico em português, de forma consistente. Não crie
+  variações para o mesmo conceito (por exemplo, use sempre
+  "Insuficiência cardíaca", nunca "ICC" ou "Insuficiência cardíaca
+  congestiva"; use sempre "Medicamentos", nunca "Medicações" ou
+  "Fármacos").
+
+Responda SOMENTE com um objeto JSON válido.
+
+Não utilize markdown (sem ```json, sem ``` de nenhum tipo).
+
+Não escreva explicações, comentários ou qualquer texto antes ou
+depois do JSON.
+
+O JSON deve conter exatamente estes campos:
+
+macrotema
+microtema
+nanotema
+""".strip()
+
+
+def _normalize_topic(
+    value: object,
+) -> str:
+
+    text = " ".join(
+        str(value or "").split()
+    )
+
+    if not text:
+        return "Não identificado"
+
+    return text[:1].upper() + text[1:]
+
+
+def parse_classification_result(
+    text: str,
+) -> dict:
+
+    """
+    Converte a resposta da IA para a classificação
+    macrotema/microtema/nanotema em um dicionário padronizado.
+    Segue o mesmo padrão de tolerância de parse_result (remove
+    cercas markdown, tenta extrair o primeiro objeto JSON).
+    """
+
+    if not text:
+        raise AIResponseError(
+            "A IA não devolveu conteúdo.",
+            raw_text=text,
+        )
+
+    cleaned = text.strip()
+
+    cleaned = re.sub(
+        r"^```(?:json)?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    cleaned = re.sub(
+        r"\s*```$",
+        "",
+        cleaned,
+    )
+
+    try:
+
+        result = json.loads(
+            cleaned
+        )
+
+    except json.JSONDecodeError:
+
+        match = re.search(
+            r"\{.*\}",
+            cleaned,
+            re.DOTALL,
+        )
+
+        if not match:
+
+            raise AIResponseError(
+                "A IA não devolveu JSON.",
+                raw_text=cleaned,
+            )
+
+        try:
+
+            result = json.loads(
+                match.group(0)
+            )
+
+        except json.JSONDecodeError as exc:
+
+            raise AIResponseError(
+                "A IA devolveu JSON inválido.",
+                raw_text=cleaned,
+            ) from exc
+
+    if not isinstance(result, dict):
+
+        raise AIResponseError(
+            "A IA devolveu um formato JSON inesperado.",
+            raw_text=cleaned,
+        )
+
+    return {
+        "macrotema": _normalize_topic(
+            result.get("macrotema")
+        ),
+        "microtema": _normalize_topic(
+            result.get("microtema")
+        ),
+        "nanotema": _normalize_topic(
+            result.get("nanotema")
+        ),
+    }
+
+
+def classify_topics(
+    provider: str,
+    api_key: str,
+    model: str,
+    summary: str,
+    ollama_url: str = "http://127.0.0.1:11434",
+) -> dict:
+
+    """
+    Classifica o resumo já existente em Macrotema/Microtema/
+    Nanotema, reaproveitando o provedor/modelo de IA já
+    configurado (mesmo dispatcher de analyze_frames, chamado
+    aqui sem frames).
+
+    Nunca levanta exceção: qualquer falha (JSON inválido, campo
+    ausente, erro de API, timeout, resposta inesperada) é
+    registrada no log e resulta em DEFAULT_TOPIC_CLASSIFICATION,
+    para que uma falha de classificação nunca interrompa o
+    processamento do vídeo.
+    """
+
+    summary = str(
+        summary or ""
+    ).strip()
+
+    if not summary:
+        return dict(
+            DEFAULT_TOPIC_CLASSIFICATION
+        )
+
+    prompt = classification_prompt(
+        summary
+    )
+
+    try:
+
+        text = _request_provider_text(
+            provider,
+            api_key,
+            model,
+            prompt,
+            [],
+            ollama_url,
+        )
+
+        return parse_classification_result(
+            text
+        )
+
+    except Exception as exc:
+
+        logger.warning(
+            "Falha ao classificar macrotema/microtema/nanotema "
+            "| provider=%s model=%s erro=%s",
+            provider,
+            model,
+            exc,
+        )
+
+        return dict(
+            DEFAULT_TOPIC_CLASSIFICATION
+        )

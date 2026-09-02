@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 class JWSessionError(RuntimeError):
@@ -988,6 +990,112 @@ class JWBrowserSession:
             raise JWSessionError(
                 str(exc)
             ) from exc
+
+    # ==========================================================
+    # DATA "CREATED" DA PÁGINA DE DETALHES DA MÍDIA
+    # ==========================================================
+    #
+    # Fallback usado quando o playback.json não traz pubdate.
+    # O painel "Media summary" da página de detalhes do vídeo no
+    # JW Player mostra um campo "Created" (ex.: "Apr 03, 2023")
+    # — confirmado por captura de tela contra vídeos reais desta
+    # conta, sempre coincidindo com o pubdate quando ambos estão
+    # disponíveis. Não gera erro: sessão desconectada, página
+    # sem esse campo ou data em formato inesperado só resultam
+    # em None (fallback silencioso, nunca bloqueia o restante do
+    # fluxo de publish_date).
+
+    def fetch_created_date(
+        self,
+        media_id: str,
+    ) -> datetime | None:
+
+        media_id = str(
+            media_id or ""
+        ).strip()
+
+        if not media_id:
+            return None
+
+        if (
+            self.status().get("state")
+            != "connected"
+        ):
+            return None
+
+        try:
+
+            future = self._executor.submit(
+                self._fetch_created_date,
+                media_id,
+            )
+
+            return future.result(
+                timeout=self.CAPTURE_TIMEOUT
+            )
+
+        except Exception:
+            return None
+
+    def _fetch_created_date(
+        self,
+        media_id: str,
+    ) -> datetime | None:
+
+        if (
+            not self._page
+            or self._page.is_closed()
+        ):
+            return None
+
+        if not self._is_authenticated_page():
+            return None
+
+        target = (
+            "https://dashboard.jwplayer.com/"
+            f"p/{self._property_id}/media/{media_id}"
+        )
+
+        try:
+
+            self._page.goto(
+                target,
+                wait_until="domcontentloaded",
+                timeout=self.NAVIGATION_TIMEOUT * 1000,
+            )
+
+            self._page.wait_for_timeout(9000)
+
+            date_pattern = re.compile(
+                r"^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}$"
+            )
+
+            locator = self._page.get_by_text(
+                date_pattern
+            )
+
+            for index in range(
+                min(locator.count(), 5)
+            ):
+
+                text = locator.nth(
+                    index
+                ).inner_text().strip()
+
+                try:
+                    return datetime.strptime(
+                        text,
+                        "%b %d, %Y",
+                    ).replace(
+                        tzinfo=timezone.utc
+                    )
+                except ValueError:
+                    continue
+
+            return None
+
+        except Exception:
+            return None
 
     # ==========================================================
     # CAPTURA DA MÍDIA

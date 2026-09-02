@@ -71,7 +71,7 @@ class EnqueueJobsPrunesJobsTests(unittest.TestCase):
         request = app_module.ProcessRequest(
             media_ids=["AAA11111", "BBB11111", "CCC11111"],
             provider="Gemini",
-            model="gemini-3.6-flash",
+            model="gemini-flash-latest",
             frame_count=4,
         )
 
