@@ -328,6 +328,13 @@ class LoginRequest(BaseModel):
     password: str = ""
 
 
+class SwitchLibraryRequest(BaseModel):
+
+    library: str = DEFAULT_JW_LIBRARY
+
+    property_id: str = ""
+
+
 class ProcessRequest(BaseModel):
 
     media_ids: list[str] = Field(
@@ -1385,29 +1392,28 @@ async def import_and_process(
 
     current_status = JW_SESSION.verify()
 
+    session_property_id = str(
+        current_status.get("property_id") or ""
+    ).strip()
+
+    if (
+        current_status.get("state") == "connected"
+        and session_property_id
+        and session_property_id != library_config["property_id"]
+    ):
+        # Mesma conta JW Player, biblioteca diferente: reaproveita
+        # a sessão já autenticada só trocando o contexto/property,
+        # sem exigir um novo login.
+        current_status = JW_SESSION.switch_property(
+            library_config["property_id"]
+        )
+
     if current_status.get("state") != "connected":
         raise HTTPException(
             status_code=409,
             detail=(
                 "A biblioteca JW Player não está autenticada. "
                 "Conecte a biblioteca selecionada antes de enviar a planilha."
-            ),
-        )
-
-    session_property_id = str(
-        current_status.get("property_id") or ""
-    ).strip()
-
-    if (
-        session_property_id
-        and session_property_id
-        != library_config["property_id"]
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "A sessão JW Player está conectada a outra biblioteca. "
-                "Selecione a biblioteca correta e conecte novamente."
             ),
         )
 
@@ -1643,6 +1649,75 @@ def jw_login(
             status_code=500,
             detail=f"Não foi possível conectar ao JW Player: {exc}",
         ) from exc
+
+
+# ==========================================================
+# TROCAR DE BIBLIOTECA JW PLAYER (MESMA SESSÃO)
+# ==========================================================
+#
+# As bibliotecas pertencem à mesma conta JW Player — trocar de
+# biblioteca é apenas mudar o contexto/property da pesquisa, não
+# uma nova autenticação. Reaproveita a sessão Playwright já
+# conectada (JW_SESSION.switch_property): não recebe nem exige
+# e-mail/senha. Só resulta em desconectado/atenção quando a
+# sessão realmente não está mais válida para nenhuma biblioteca.
+
+@app.post("/api/jw/switch-library")
+def jw_switch_library(
+    request: SwitchLibraryRequest,
+):
+    library_key = normalize_library(request.library)
+    library = JW_LIBRARIES[library_key]
+
+    sent_property_id = str(
+        request.property_id or ""
+    ).strip()
+
+    if (
+        sent_property_id
+        and sent_property_id != library["property_id"]
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "O Property ID informado não corresponde "
+                "à biblioteca selecionada."
+            ),
+        )
+
+    update_current_library(library_key)
+
+    try:
+        result = JW_SESSION.switch_property(
+            library["property_id"]
+        )
+
+    except JWSessionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Não foi possível trocar de biblioteca "
+                f"no JW Player: {exc}"
+            ),
+        ) from exc
+
+    result = dict(result or {})
+    result["library"] = library_key
+    result["library_name"] = library["name"]
+    result["property_id"] = library["property_id"]
+    result["library_url"] = library["url"]
+    result["connected"] = (
+        result.get("state") == "connected"
+        or result.get("connected") is True
+    )
+
+    return result
 
 
 # ==========================================================
@@ -2693,20 +2768,6 @@ def analyze_jwplayer(
         JW_SESSION.status()
     )
 
-    if session_status.get(
-        "state"
-    ) != "connected":
-
-        raise HTTPException(
-
-            status_code=409,
-
-            detail=(
-                "Conecte primeiro "
-                "a biblioteca JW Player."
-            ),
-        )
-
     session_property_id = str(
 
         session_status.get(
@@ -2721,28 +2782,30 @@ def analyze_jwplayer(
 
     ).strip()
 
-    # Se o backend conseguiu identificar
-    # a biblioteca da sessão, garante que
-    # é a mesma escolhida no frontend.
-
+    # Mesma conta JW Player, biblioteca diferente: reaproveita a
+    # sessão já autenticada só trocando o contexto/property, sem
+    # exigir um novo login.
     if (
-        session_property_id
+        session_status.get("state") == "connected"
         and session_property_id
-        != library["property_id"]
+        and session_property_id != library["property_id"]
     ):
+
+        session_status = JW_SESSION.switch_property(
+            library["property_id"]
+        )
+
+    if session_status.get(
+        "state"
+    ) != "connected":
 
         raise HTTPException(
 
             status_code=409,
 
             detail=(
-
-                "A sessão JW Player atual "
-                "está conectada à biblioteca "
-                f"{session_property_id}, "
-                "mas a biblioteca selecionada "
-                f"é {library['name']}."
-                " Conecte novamente."
+                "Conecte primeiro "
+                "a biblioteca JW Player."
             ),
         )
 

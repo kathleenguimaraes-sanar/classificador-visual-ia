@@ -22,11 +22,7 @@ services:
 
     healthCheckPath: /health
 
-    # Somente as variáveis que app.py (o serviço web) realmente
-    # lê via os.getenv. JW_SITE_ID, JW_DELIVERY_TOKEN, FRAME_COUNT
-    # e MAX_RETRIES existem em .env.example mas pertencem à CLI
-    # legada (main.py / src/portfolio/config.py) — não têm efeito
-    # nenhum aqui e por isso não estão listadas.
+ 
     envVars:
       - key: GEMINI_API_KEY
         sync: false

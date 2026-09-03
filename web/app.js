@@ -587,9 +587,13 @@ function registerJWLibraryChange() {
                 `Biblioteca ${library.name} selecionada.`
             );
 
-            // Verifica imediatamente a sessão
-            // correspondente à biblioteca selecionada.
-            await checkJWStatus();
+            // Reaproveita a sessão JW Player já conectada,
+            // apenas trocando o contexto/property da pesquisa
+            // — não solicita e-mail/senha novamente.
+            await switchJWLibrary(
+                library,
+                libraryKey
+            );
         }
     );
 }
@@ -1413,6 +1417,63 @@ function applyConnection(status = {}) {
 }
 
 // ==========================================================
+// TROCAR DE BIBLIOTECA (MESMA SESSÃO JW PLAYER)
+// ==========================================================
+//
+// As bibliotecas pertencem à mesma conta JW Player: trocar de
+// biblioteca não é um novo login, é só mudar o contexto/property
+// da pesquisa. Reaproveita a sessão já conectada em segundo
+// plano (/api/jw/switch-library) — não envia e-mail nem senha.
+// Só resulta em "desconectado" quando a sessão realmente não
+// está mais válida, e nesse caso o usuário pode reconectar
+// normalmente pelo formulário de login.
+
+async function switchJWLibrary(library, libraryKey) {
+    try {
+        const status =
+            await api(
+                '/api/jw/switch-library',
+                {
+                    method: 'POST',
+
+                    headers: {
+                        'Content-Type':
+                            'application/json'
+                    },
+
+                    body: JSON.stringify({
+                        property_id:
+                            library.propertyId,
+
+                        library:
+                            libraryKey
+                    })
+                }
+            );
+
+        applyConnection(status);
+
+        return status;
+    } catch (error) {
+        applyConnection({
+            state: 'disconnected',
+
+            property_id:
+                library.propertyId,
+
+            library:
+                libraryKey,
+
+            message:
+                error.message ||
+                'Erro ao trocar de biblioteca no JW Player.'
+        });
+
+        return null;
+    }
+}
+
+// ==========================================================
 // VERIFICAR STATUS DO JW PLAYER
 // ==========================================================
 
@@ -1640,14 +1701,7 @@ async function handleSessionExpired(message) {
     await checkJWStatus();
 }
 
-// ==========================================================
-// FILTRO DE DATA DE PUBLICAÇÃO
-// ==========================================================
-//
-// Controles compartilhados pela planilha e pela análise
-// individual — o mesmo filtro vale para os dois fluxos.
-// Sem o checkbox marcado, min_publish_date vai vazio e o
-// backend trata como "sem filtro" (todo vídeo elegível).
+
 
 function getPublishDateFilter() {
     const enabled =

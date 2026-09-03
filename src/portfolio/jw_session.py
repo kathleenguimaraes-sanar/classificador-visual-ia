@@ -41,6 +41,7 @@ class JWBrowserSession:
     NAVIGATION_TIMEOUT = 60
     VERIFY_TIMEOUT = 30
     CAPTURE_TIMEOUT = 180
+    SWITCH_TIMEOUT = 60
 
     def __init__(self):
         self._executor = ThreadPoolExecutor(
@@ -984,6 +985,165 @@ class JWBrowserSession:
                 "error",
                 str(exc),
                 current,
+                connected=False,
+            )
+
+            raise JWSessionError(
+                str(exc)
+            ) from exc
+
+    # ==========================================================
+    # TROCA DE BIBLIOTECA (MESMA SESSÃO AUTENTICADA)
+    # ==========================================================
+    #
+    # As bibliotecas JW Player desta conta compartilham a mesma
+    # autenticação — autenticação (login/sessão) e biblioteca
+    # (property/site pesquisado) são conceitos independentes.
+    # Trocar de biblioteca não deve fechar o navegador nem exigir
+    # e-mail/senha novamente: apenas navega, com o mesmo contexto
+    # Playwright já autenticado, até o dashboard da nova property
+    # e atualiza self._property_id — exatamente como um usuário
+    # clicando no seletor de propriedade dentro do próprio JW
+    # Player, sem passar pela tela de login.
+    #
+    # Só resulta em "desconectado"/"atenção" quando a navegação
+    # realmente cai numa tela de login/desafio — ou seja, quando a
+    # sessão está de fato expirada ou inválida, não simplesmente
+    # porque a biblioteca mudou.
+
+    def switch_property(
+        self,
+        property_id: str,
+    ) -> dict:
+
+        property_id = property_id.strip()
+
+        if len(property_id) != 8:
+            raise JWSessionError(
+                "O Property ID deve ter oito caracteres."
+            )
+
+        future = self._executor.submit(
+            self._switch_property,
+            property_id,
+        )
+
+        try:
+            return future.result(
+                timeout=self.SWITCH_TIMEOUT
+            )
+
+        except JWSessionError:
+            raise
+
+        except Exception as exc:
+            raise JWSessionError(
+                f"Falha ao trocar de biblioteca "
+                f"no JW Player: {exc}"
+            ) from exc
+
+    def _switch_property(
+        self,
+        property_id: str,
+    ) -> dict:
+
+        if (
+            not self._page
+            or self._page.is_closed()
+        ):
+
+            self._set_status(
+                "disconnected",
+                "Navegador JW Player fechado.",
+                connected=False,
+            )
+
+            return self.status()
+
+        previous_property_id = self._property_id
+
+        target = (
+            "https://dashboard.jwplayer.com/"
+            f"p/{property_id}/media"
+        )
+
+        try:
+
+            self._page.goto(
+                target,
+                wait_until="domcontentloaded",
+                timeout=self.NAVIGATION_TIMEOUT * 1000,
+            )
+
+            self._page.wait_for_timeout(1500)
+
+            current = self._page.url
+            current_lower = current.lower()
+
+            # Tentativamente, para _is_authenticated_page()
+            # avaliar a biblioteca nova — revertido abaixo se
+            # a troca não for confirmada.
+            self._property_id = property_id
+
+            if self._is_authenticated_page():
+                return self._finish_connected()
+
+            self._property_id = previous_property_id
+
+            if (
+                "/login" in current_lower
+                or "/signin" in current_lower
+            ):
+
+                self._set_status(
+                    "disconnected",
+                    (
+                        "A sessão JW Player expirou. "
+                        "Conecte novamente para acessar "
+                        "essa biblioteca."
+                    ),
+                    current,
+                    connected=False,
+                )
+
+            elif (
+                "challenge" in current_lower
+                or "captcha" in current_lower
+                or "mfa" in current_lower
+            ):
+
+                self._set_status(
+                    "attention",
+                    (
+                        "O JW Player solicitou uma nova "
+                        "autenticação."
+                    ),
+                    current,
+                    connected=False,
+                )
+
+            else:
+
+                self._set_status(
+                    "attention",
+                    (
+                        "Não foi possível confirmar o "
+                        "acesso à biblioteca selecionada "
+                        "com a sessão atual."
+                    ),
+                    current,
+                    connected=False,
+                )
+
+            return self.status()
+
+        except Exception as exc:
+
+            self._property_id = previous_property_id
+
+            self._set_status(
+                "error",
+                str(exc),
                 connected=False,
             )
 

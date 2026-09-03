@@ -1,6 +1,7 @@
 import csv
 import io
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from app import (
     ANALYSIS_LOCK,
     DATABASE,
     EXPORT_COLUMNS,
+    JW_SESSION,
     PROCESSOR,
     _dedupe_by_jwplayer_id,
     _publish_date_year,
@@ -21,6 +23,7 @@ from app import (
     is_session_interruption,
 )
 from src.portfolio.ai import AIError
+from src.portfolio.database import Database
 from src.portfolio.jw_session import JWSessionError
 
 FORBIDDEN_CSV_COLUMNS = {
@@ -83,6 +86,126 @@ class ApiTests(unittest.TestCase):
             response.json()["detail"],
             "Selecione Gemini, Claude ou Ollama.",
         )
+
+    # TESTE 1/2/3 (troca de biblioteca) — reaproveita a sessão já
+    # conectada, sem pedir e-mail/senha novamente.
+    def test_switch_library_reuses_session_without_credentials(self):
+        with patch.object(
+            JW_SESSION,
+            "switch_property",
+            return_value={
+                "state": "connected",
+                "connected": True,
+                "property_id": "FvJr6FNj",
+                "message": "Sessão JW Player conectada e autenticada.",
+            },
+        ) as mock_switch:
+            response = self.client.post(
+                "/api/jw/switch-library",
+                json={"library": "DEV", "property_id": "FvJr6FNj"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["connected"])
+        self.assertEqual(body["library"], "DEV")
+        self.assertEqual(body["property_id"], "FvJr6FNj")
+
+        # Nenhuma credencial é enviada nem exigida para trocar de
+        # biblioteca — só o property_id da nova biblioteca.
+        mock_switch.assert_called_once_with("FvJr6FNj")
+
+    def test_switch_library_rejects_mismatched_property_id(self):
+        response = self.client.post(
+            "/api/jw/switch-library",
+            json={"library": "DEV", "property_id": "XdfUPSCL"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    # TESTE 4 — sessão realmente expirada: a troca reporta
+    # desconectado (permitindo um novo login normal pela tela),
+    # em vez de levantar um erro.
+    def test_switch_library_reports_expired_session_without_error(self):
+        with patch.object(
+            JW_SESSION,
+            "switch_property",
+            return_value={
+                "state": "disconnected",
+                "connected": False,
+                "property_id": "",
+                "message": (
+                    "A sessão JW Player expirou. Conecte novamente "
+                    "para acessar essa biblioteca."
+                ),
+            },
+        ):
+            response = self.client.post(
+                "/api/jw/switch-library",
+                json={"library": "EBSERH", "property_id": "UBP82vRQ"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["connected"])
+        self.assertEqual(body["state"], "disconnected")
+
+    # A análise individual não deve exigir reconexão só porque a
+    # sessão está conectada a uma biblioteca diferente da
+    # selecionada — deve reaproveitar a sessão (switch_property).
+    def test_analyze_jwplayer_reuses_session_when_library_differs(self):
+        # Banco isolado: este endpoint escreve em `imports`/`videos`
+        # (ensure_video_for_jwplayer_id) e não pode alterar a
+        # execução (run_id) "atual" do banco real usada por outros
+        # testes de exportação.
+        path = Path("tests/.test_switch_library_analyze.db")
+        path.unlink(missing_ok=True)
+
+        try:
+            with patch(
+                "app.DATABASE",
+                Database(path),
+            ), patch.object(
+                JW_SESSION,
+                "status",
+                return_value={
+                    "state": "connected",
+                    "property_id": "FvJr6FNj",
+                },
+            ), patch.object(
+                JW_SESSION,
+                "switch_property",
+                return_value={
+                    "state": "connected",
+                    "connected": True,
+                    "property_id": "XdfUPSCL",
+                },
+            ) as mock_switch, patch(
+                "app.check_publish_dates",
+                return_value={"will_be_analyzed": 1},
+            ), patch(
+                "app.enqueue_jobs",
+                return_value=[],
+            ) as mock_enqueue:
+                response = self.client.post(
+                    "/api/analyze-jwplayer",
+                    json={
+                        "jwplayer_id": "SwiTest1",
+                        "library": "VIDEOSSANAR",
+                        "property_id": "XdfUPSCL",
+                        "provider": "Gemini",
+                        "model": "gemini-flash-latest",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            mock_switch.assert_called_once_with("XdfUPSCL")
+            mock_enqueue.assert_called_once()
+        finally:
+            path.unlink(missing_ok=True)
+            for wal in Path("tests").glob(
+                ".test_switch_library_analyze.db-*"
+            ):
+                wal.unlink(missing_ok=True)
 
     def test_session_interruption_is_not_a_media_error(self):
         self.assertTrue(is_session_interruption(JWSessionError("Conecte uma sessão JW Player antes de acessar a mídia.")))
