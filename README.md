@@ -108,9 +108,13 @@ docker build -t cetruslabia-backend ./backend
 docker run --rm -p 8000:8000 --env-file ./backend/.env cetruslabia-backend
 ```
 
+Esse comando e somente para desenvolvimento local. Na maquina Pirata, use `deploy/compose.yaml`, que configura volume persistente, healthcheck, reinicio automatico e publica a API apenas em `127.0.0.1:8106`. O procedimento completo esta em `deploy/README.md`.
+
 Os artefatos do backend ficam em `backend/`:
 
 - `backend/Dockerfile` — instala FFmpeg, Chromium e as dependências Python;
 - `backend/.dockerignore` — limita o contexto da imagem;
 - `render.yaml` — Blueprint do serviço (sem segredos);
 - `backend/.env.example` — referência das variáveis de ambiente.
+- `deploy/compose.yaml` — execucao isolada na maquina Pirata;
+- `deploy/BACKUP_RESTORE.md` — backup e restauracao do SQLite.

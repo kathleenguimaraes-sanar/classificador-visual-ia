@@ -27,6 +27,7 @@ A branch `main` somente sera alterada no final, depois da homologacao. Desenvolv
 - [x] Primeiro commit local criado: `0a9c2f9`.
 - [x] Branch publicada no GitHub.
 - [x] Pull Request draft aberto: https://github.com/kathleenguimaraes-sanar/CetrusLabIA/pull/1.
+- [x] Artefatos operacionais do backend preparados em `deploy/`.
 - [ ] Backend instalado na maquina Pirata.
 - [ ] Frontend publicado no Lovable.
 - [ ] Homologacao ponta a ponta concluida.
@@ -51,8 +52,19 @@ Criterio de conclusao: branch remota e PR disponiveis para revisao, enquanto `ma
 
 Objetivo: garantir que a maquina consiga executar o backend continuamente e preservar dados.
 
-- [ ] Confirmar sistema operacional, acesso administrativo e arquitetura da maquina.
-- [ ] Confirmar Docker e Docker Compose.
+Levantamento de 2026-09-04:
+
+- Ubuntu 26.04 LTS `x86_64`, 8 CPUs, 30 GiB de RAM e 4 GiB de swap;
+- Docker 29.6.2 e Compose 5.3.1, com Swarm single-node ativo;
+- 88 GiB livres na particao principal;
+- porta `8000` ocupada e `8106` livre no momento da inspecao;
+- Cloudflare Tunnel existente executando na rede do host;
+- nenhuma instalacao anterior do CetrusLabIA localizada.
+
+Decisao atual: executar o backend por Docker Compose standalone, isolado das stacks Swarm, com bind somente em `127.0.0.1:8106`. O tunnel podera acessar essa porta pela rede do host sem conectar o CetrusLabIA as redes dos outros servicos.
+
+- [x] Confirmar sistema operacional, acesso administrativo e arquitetura da maquina.
+- [x] Confirmar Docker e Docker Compose.
 - [ ] Desabilitar suspensao automatica da maquina.
 - [ ] Definir diretorio permanente da aplicacao.
 - [ ] Localizar o banco `portfolio.db` e demais dados existentes.
@@ -169,9 +181,9 @@ Criterio de conclusao: `main`, Lovable e Pirata executam a mesma versao homologa
 
 Depois do macropasso 1, ainda antes de termos todos os acessos externos, podemos preparar:
 
-- arquivo Docker Compose para a maquina Pirata;
-- checklist e script de verificacao de deploy;
+- [x] arquivo Docker Compose para a maquina Pirata;
+- [x] checklist de instalacao e verificacao de deploy;
 - modelo de configuracao de proxy/tunel sem segredos;
 - workflow de CI para testes de frontend e backend;
-- procedimento de backup e restauracao do SQLite;
+- [x] procedimento de backup e restauracao do SQLite;
 - guia de configuracao do Lovable e das variaveis de ambiente.
