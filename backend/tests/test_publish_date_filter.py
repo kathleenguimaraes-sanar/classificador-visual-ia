@@ -191,10 +191,16 @@ class IndividualAnalysisRespectsFilterTests(unittest.TestCase):
         self.path = Path("tests/.test_publish_date_filter_api.db")
         self.path.unlink(missing_ok=True)
         app_module.DATABASE = Database(self.path)
+        self.api_keys_patch = patch.dict(
+            app_module.AI_API_KEYS,
+            {"Gemini": "test-key"},
+        )
+        self.api_keys_patch.start()
         self.client = TestClient(app_module.app)
         app_module.JW_SESSION.status = lambda: {"state": "connected", "property_id": "XdfUPSCL"}
 
     def tearDown(self):
+        self.api_keys_patch.stop()
         self.path.unlink(missing_ok=True)
         for wal in Path("tests").glob(".test_publish_date_filter_api.db-*"):
             wal.unlink(missing_ok=True)

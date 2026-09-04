@@ -9,3 +9,7 @@ saida_audio/
 frames_video/
 .pytest_cache/
 .coverage
+node_modules/
+dist/
+.env.local
+*.tsbuildinfo
