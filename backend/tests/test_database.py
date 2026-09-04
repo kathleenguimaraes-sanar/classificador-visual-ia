@@ -78,10 +78,50 @@ class DatabaseTests(unittest.TestCase):
             second = database.import_rows(rows, "base.xlsx")
             self.assertEqual(first["new"], 2)
             self.assertEqual(second["unchanged"], 2)
+            self.assertLess(first["run_id"], second["run_id"])
             self.assertEqual(len(database.unique_media()), 1)
             database.update_analysis("Ab12Cd34", status="Concluído", summary="Resumo")
             portfolio = database.list_portfolio()
             self.assertEqual([row["summary"] for row in portfolio], ["Resumo", "Resumo"])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_eligible_media_can_be_selected_by_run(self):
+        path = Path("tests/.test_eligible_run.db")
+        path.unlink(missing_ok=True)
+        try:
+            database = Database(path)
+            first = database.import_rows(
+                [{"record_id": "1", "lesson_name": "A", "jwplayer_id": "Ab12Cd34", "keywords": ""}],
+                "first.xlsx",
+            )
+            database.update_filter_result(
+                "Ab12Cd34",
+                publish_date="2025-01-01T00:00:00+00:00",
+                filter_status="eligible",
+                filter_reason="no_filter_applied",
+                eligible_for_analysis=True,
+            )
+            second = database.import_rows(
+                [{"record_id": "2", "lesson_name": "B", "jwplayer_id": "Ef56Gh78", "keywords": ""}],
+                "second.xlsx",
+            )
+            database.update_filter_result(
+                "Ef56Gh78",
+                publish_date="2025-01-01T00:00:00+00:00",
+                filter_status="eligible",
+                filter_reason="no_filter_applied",
+                eligible_for_analysis=True,
+            )
+
+            self.assertEqual(
+                database.eligible_media_for_run(first["run_id"]),
+                ["Ab12Cd34"],
+            )
+            self.assertEqual(
+                database.eligible_media_for_run(second["run_id"]),
+                ["Ef56Gh78"],
+            )
         finally:
             path.unlink(missing_ok=True)
 

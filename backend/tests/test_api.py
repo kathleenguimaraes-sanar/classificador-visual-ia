@@ -1,5 +1,6 @@
 import csv
 import io
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -43,7 +44,7 @@ class ApiTests(unittest.TestCase):
     def test_home_and_portfolio_endpoints(self):
         home = self.client.get("/")
         self.assertEqual(home.status_code, 200)
-        self.assertIn("Portfólio de vídeos Cetrus", home.text)
+        self.assertIn("CetrusLabIA", home.text)
         stats = self.client.get("/api/stats")
         self.assertEqual(stats.status_code, 200)
         self.assertIn("records", stats.json())
@@ -86,6 +87,37 @@ class ApiTests(unittest.TestCase):
             response.json()["detail"],
             "Selecione Gemini, Claude ou Ollama.",
         )
+
+    def test_start_eligible_requires_and_uses_import_run(self):
+        missing_run = self.client.post(
+            "/api/start-eligible",
+            json={"provider": "Gemini"},
+        )
+        self.assertEqual(missing_run.status_code, 422)
+
+        with patch.dict(
+            AI_API_KEYS,
+            {"Gemini": "test-key"},
+        ), patch.object(
+            DATABASE,
+            "eligible_media_for_run",
+            return_value=["Run12345"],
+        ) as mock_eligible, patch.object(
+            DATABASE,
+            "unique_media",
+            return_value=[{"jwplayer_id": "Run12345", "status": "Pendente"}],
+        ), patch(
+            "app.enqueue_jobs",
+            return_value=[],
+        ):
+            response = self.client.post(
+                "/api/start-eligible",
+                json={"run_id": 17, "provider": "Gemini"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["media_count"], 1)
+        mock_eligible.assert_called_once_with(17)
 
     # TESTE 1/2/3 (troca de biblioteca) — reaproveita a sessão já
     # conectada, sem pedir e-mail/senha novamente.
@@ -161,7 +193,10 @@ class ApiTests(unittest.TestCase):
         path.unlink(missing_ok=True)
 
         try:
-            with patch(
+            with patch.dict(
+                AI_API_KEYS,
+                {"Gemini": "test-key"},
+            ), patch(
                 "app.DATABASE",
                 Database(path),
             ), patch.object(
@@ -268,28 +303,63 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(FORBIDDEN_CSV_COLUMNS.intersection(header))
 
     def test_export_csv_filters_by_publish_year(self):
-        portfolio = _dedupe_by_jwplayer_id(DATABASE.list_portfolio())
-        completed = [row for row in portfolio if row.get("status") == "Concluído"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Database(Path(temp_dir) / "portfolio.db")
+            database.import_rows(
+                [
+                    {
+                        "record_id": "2024",
+                        "lesson_name": "Aula 2024",
+                        "jwplayer_id": "Year2024",
+                        "keywords": "",
+                    },
+                    {
+                        "record_id": "2025",
+                        "lesson_name": "Aula 2025",
+                        "jwplayer_id": "Year2025",
+                        "keywords": "",
+                    },
+                ],
+                "anos.xlsx",
+            )
+            for media_id in ("Year2024", "Year2025"):
+                database.update_analysis(media_id, status="Concluído")
+            with database.connect() as connection:
+                connection.execute(
+                    "UPDATE videos SET publish_date=? WHERE jwplayer_id=?",
+                    ("2024-05-10T12:00:00Z", "Year2024"),
+                )
+                connection.execute(
+                    "UPDATE videos SET publish_date=? WHERE jwplayer_id=?",
+                    ("2025-05-10T12:00:00Z", "Year2025"),
+                )
 
-        years = {
-            _publish_date_year(row.get("publish_date"))
-            for row in completed
-        }
-        years.discard(None)
-        self.assertTrue(years, "esperava ao menos um ano entre as aulas concluídas")
+            with patch("app.DATABASE", database):
+                response = self.client.get(
+                    "/api/export.csv",
+                    params={"year": "2024"},
+                )
+                xlsx_response = self.client.get(
+                    "/api/export.xlsx",
+                    params={"year": "2024"},
+                )
 
-        year = sorted(years)[0]
-        expected = [
-            row
-            for row in completed
-            if _publish_date_year(row.get("publish_date")) == year
-        ]
-
-        response = self.client.get("/api/export.csv", params={"year": str(year)})
-        self.assertEqual(response.status_code, 200)
-
-        _, data_rows = self._read_csv(response)
-        self.assertEqual(len(data_rows), len(expected))
+            self.assertEqual(response.status_code, 200)
+            header, data_rows = self._read_csv(response)
+            self.assertEqual(len(data_rows), 1)
+            self.assertEqual(
+                data_rows[0][header.index("JWPlayer ID")],
+                "Year2024",
+            )
+            workbook = self._load_xlsx(xlsx_response)
+            videos_sheet = workbook["Vídeos"]
+            xlsx_header = [cell.value for cell in videos_sheet[1]]
+            jwplayer_column = xlsx_header.index("JWPlayer ID") + 1
+            self.assertEqual(videos_sheet.max_row, 2)
+            self.assertEqual(
+                videos_sheet.cell(row=2, column=jwplayer_column).value,
+                "Year2024",
+            )
 
     def test_export_csv_rejects_invalid_year(self):
         response = self.client.get("/api/export.csv", params={"year": "not-a-year"})
@@ -487,34 +557,37 @@ class ApiTests(unittest.TestCase):
     # (build_jwplayer_media_url), e o texto exibido continua sendo
     # somente o JWPlayer ID.
     def test_export_xlsx_jwplayer_id_cell_is_the_hyperlink(self):
-        response = self.client.get("/api/export.xlsx")
-        workbook = self._load_xlsx(response)
-        videos_sheet = workbook["Vídeos"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Database(Path(temp_dir) / "portfolio.db")
+            database.import_rows(
+                [
+                    {
+                        "record_id": "link",
+                        "lesson_name": "Aula com link",
+                        "jwplayer_id": "Link1234",
+                        "keywords": "",
+                    }
+                ],
+                "links.xlsx",
+            )
+            database.update_analysis("Link1234", status="Concluído")
 
-        header = [cell.value for cell in videos_sheet[1]]
-        jwplayer_col = header.index("JWPlayer ID") + 1
-        library = get_current_library()
+            with patch("app.DATABASE", database):
+                response = self.client.get("/api/export.xlsx")
 
-        checked_any = False
-        for row in videos_sheet.iter_rows(min_row=2):
-            jwplayer_cell = row[jwplayer_col - 1]
-            jwplayer_id = jwplayer_cell.value
-
+            workbook = self._load_xlsx(response)
+            videos_sheet = workbook["Vídeos"]
+            header = [cell.value for cell in videos_sheet[1]]
+            jwplayer_col = header.index("JWPlayer ID") + 1
+            jwplayer_cell = videos_sheet.cell(row=2, column=jwplayer_col)
+            library = get_current_library()
             expected_url = build_jwplayer_media_url(
-                jwplayer_id, library["property_id"]
+                "Link1234", library["property_id"]
             )
 
-            if expected_url:
-                self.assertEqual(
-                    jwplayer_cell.hyperlink.target, expected_url
-                )
-                self.assertEqual(jwplayer_cell.value, jwplayer_id)
-                self.assertFalse(
-                    str(jwplayer_cell.value).startswith("http")
-                )
-                checked_any = True
-
-        self.assertTrue(checked_any, "esperava ao menos um link clicável")
+            self.assertEqual(jwplayer_cell.hyperlink.target, expected_url)
+            self.assertEqual(jwplayer_cell.value, "Link1234")
+            self.assertFalse(str(jwplayer_cell.value).startswith("http"))
 
     # TESTE 10 — Macrotema, Microtema e Nanotema continuam presentes.
     def test_export_includes_topic_classification_columns(self):

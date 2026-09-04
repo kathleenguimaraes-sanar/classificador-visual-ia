@@ -1,6 +1,23 @@
-# Portfólio de vídeos Cetrus
+# CetrusLabIA
 
-Aplicação FastAPI com interface web própria para importar, organizar, processar, classificar e validar o portfólio de videoaulas Cetrus. A solução evolui o protótipo original e mantém seus scripts experimentais como referência técnica.
+Monorepo da aplicação para importar, organizar, processar, classificar e validar o portfólio de videoaulas Cetrus.
+
+## Estrutura
+
+- `src/` — frontend React/Vite/TypeScript operado pelo Lovable;
+- `backend/` — API FastAPI, pipeline de mídia, interface web legada e testes;
+- `render.yaml` — configuração legada de deploy do backend no Render.
+
+## Frontend
+
+O frontend usa `VITE_API_BASE_URL` para localizar a API. Copie `.env.example` para `.env.local` e execute:
+
+```bash
+npm install
+npm run dev
+```
+
+O Vite também encaminha `/api` e `/health` para `http://127.0.0.1:8000` quando `VITE_API_BASE_URL` não estiver definido. Em produção, configure o domínio HTTPS da API no ambiente do Lovable.
 
 ## O que já está disponível
 
@@ -23,6 +40,7 @@ Aplicação FastAPI com interface web própria para importar, organizar, process
 Requer Python 3.11 ou mais recente e FFmpeg instalado (disponível no `PATH`).
 
 ```bash
+cd backend
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
@@ -32,6 +50,28 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
 Depois de copiar `.env.example` para `.env`, preencha ao menos `GEMINI_API_KEY` e/ou `ANTHROPIC_API_KEY`. `ENABLE_OLLAMA=true` (padrão local) habilita a opção Ollama na interface — requer um servidor Ollama rodando em `OLLAMA_URL` (padrão `http://127.0.0.1:11434`) com o modelo visual já baixado (ex.: `ollama pull llava:7b`).
+
+Preencha também `APP_AUTH_USERNAME`, `APP_AUTH_PASSWORD` e uma chave aleatória com pelo menos 32 caracteres em `APP_AUTH_SESSION_SECRET`. Para gerar a chave:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`CORS_ALLOWED_ORIGINS` recebe as origens exatas autorizadas a acessar a API, separadas por vírgula. Não use `*`. O frontend deve enviar as requisições com `credentials: "include"` para receber e reutilizar o cookie HttpOnly.
+
+Em desenvolvimento HTTP, use `APP_AUTH_COOKIE_SECURE=false` e `APP_AUTH_COOKIE_SAMESITE=lax`. Em produção, use um domínio próprio compartilhado, como `cetruslabia.exemplo.com` no Lovable e `api.cetruslabia.exemplo.com` na máquina Pirata, com `APP_AUTH_COOKIE_SECURE=true` e `APP_AUTH_COOKIE_SAMESITE=lax`. Essa configuração evita depender de cookies de terceiros, bloqueados por alguns navegadores.
+
+O backend limita falhas de login por origem. Quando ele estiver acessível exclusivamente por um proxy ou túnel confiável, `APP_AUTH_TRUST_PROXY_HEADERS=true` permite identificar o cliente pelos cabeçalhos encaminhados. Mantenha `false` se a aplicação aceitar conexões diretas.
+
+As únicas rotas públicas da API são `/health` e `/api/auth/*`. Com autenticação habilitada, as demais rotas, o Swagger e o schema OpenAPI exigem uma sessão válida.
+
+O logout invalida todas as sessões da aplicação imediatamente. Reiniciar o backend também exige novo login, assim como já ocorre com a sessão do JW Player.
+
+### Migração de uma instalação existente
+
+Antes de iniciar o backend pela nova estrutura, mova a configuração local da raiz para `backend/.env` e confirme que `APP_AUTH_ENABLED=true`. Não exponha a API enquanto usuário, senha, segredo de sessão e `CORS_ALLOWED_ORIGINS` não estiverem configurados.
+
+O diretório de dados padrão agora é `backend/data`. Para preservar um banco existente, mova o conteúdo do antigo `data/` para `backend/data/` com o serviço parado ou defina `CETRUS_DATA_DIR` com o caminho absoluto do diretório antigo. Faça uma cópia de segurança de `portfolio.db` antes da migração.
 
 Depois da instalação inicial, também é possível iniciar com duplo clique em `iniciar_aplicacao.bat`.
 
@@ -59,13 +99,22 @@ A CLI persiste os estados `pending`, `downloading`, `transcribing`, `classifying
 
 Antes de usar `--run`, copie `.env.example` para `.env` e preencha o bloco `CUSTOM_SYSTEM_PROMPT` em `src/portfolio/classify.py`.
 
-### 1. Preparar o repositório
+## Docker
 
-Os artefatos de deploy já estão no projeto:
+Execute a partir da raiz do monorepo:
 
-- `Dockerfile` — instala FFmpeg, o Chromium do Playwright (com `--with-deps`) e as dependências Python;
+```bash
+docker build -t cetruslabia-backend ./backend
+docker run --rm -p 8000:8000 --env-file ./backend/.env cetruslabia-backend
+```
+
+Esse comando e somente para desenvolvimento local. Na maquina Pirata, use `deploy/compose.yaml`, que configura volume persistente, healthcheck, reinicio automatico e publica a API apenas em `127.0.0.1:8106`. O procedimento completo esta em `deploy/README.md`.
+
+Os artefatos do backend ficam em `backend/`:
+
+- `backend/Dockerfile` — instala FFmpeg, Chromium e as dependências Python;
+- `backend/.dockerignore` — limita o contexto da imagem;
 - `render.yaml` — Blueprint do serviço (sem segredos);
-- `.dockerignore`.
-
-
-
+- `backend/.env.example` — referência das variáveis de ambiente.
+- `deploy/compose.yaml` — execucao isolada na maquina Pirata;
+- `deploy/BACKUP_RESTORE.md` — backup e restauracao do SQLite.

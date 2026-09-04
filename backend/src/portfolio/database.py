@@ -1039,6 +1039,7 @@ class Database:
             )
 
         return {
+            "run_id": run_id,
             "total": len(rows),
             "new": created,
             "updated": updated,
@@ -1349,6 +1350,32 @@ class Database:
 
                 for row in connection.execute(
                     query
+                )
+            ]
+
+    def eligible_media_for_run(
+        self,
+        run_id: int,
+    ) -> list[str]:
+
+        """JWPlayer IDs elegíveis vinculados à execução informada."""
+
+        query = """
+        SELECT DISTINCT
+            v.jwplayer_id
+        FROM videos v
+        WHERE v.run_id = ?
+        AND v.eligible_for_analysis = 1
+        """
+
+        with self.connect() as connection:
+
+            return [
+                row["jwplayer_id"]
+
+                for row in connection.execute(
+                    query,
+                    (run_id,),
                 )
             ]
 

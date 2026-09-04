@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
 import gc
+import hashlib
+import hmac
 import io
+import json
 import logging
 import os
+import secrets
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -86,6 +94,150 @@ DATABASE = Database(
 )
 
 WEB_DIR = BASE_DIR / "web"
+
+
+# ==========================================================
+# ACESSO DO FRONTEND
+# ==========================================================
+
+def env_flag(
+    name: str,
+    default: str = "false",
+) -> bool:
+
+    return str(
+        os.getenv(name, default)
+    ).strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def configured_origins() -> tuple[str, ...]:
+
+    origins = tuple(
+        origin.strip().rstrip("/")
+        for origin in os.getenv(
+            "CORS_ALLOWED_ORIGINS",
+            "",
+        ).split(",")
+        if origin.strip()
+    )
+
+    if "*" in origins:
+        raise RuntimeError(
+            "CORS_ALLOWED_ORIGINS não pode usar '*' quando cookies "
+            "de autenticação estão habilitados."
+        )
+
+    return origins
+
+
+CORS_ALLOWED_ORIGINS = configured_origins()
+
+AUTH_ENABLED = env_flag("APP_AUTH_ENABLED")
+
+AUTH_USERNAME = os.getenv(
+    "APP_AUTH_USERNAME",
+    "",
+).strip()
+
+AUTH_PASSWORD = os.getenv(
+    "APP_AUTH_PASSWORD",
+    "",
+)
+
+AUTH_SESSION_SECRET = os.getenv(
+    "APP_AUTH_SESSION_SECRET",
+    "",
+)
+
+AUTH_SESSION_TTL_SECONDS = int(
+    os.getenv(
+        "APP_AUTH_SESSION_TTL_SECONDS",
+        "28800",
+    )
+)
+
+AUTH_COOKIE_NAME = os.getenv(
+    "APP_AUTH_COOKIE_NAME",
+    "cetrus_session",
+).strip()
+
+AUTH_COOKIE_SECURE = env_flag(
+    "APP_AUTH_COOKIE_SECURE",
+    "true",
+)
+
+AUTH_COOKIE_SAMESITE = os.getenv(
+    "APP_AUTH_COOKIE_SAMESITE",
+    "lax",
+).strip().casefold()
+
+AUTH_LOGIN_MAX_ATTEMPTS = int(
+    os.getenv(
+        "APP_AUTH_LOGIN_MAX_ATTEMPTS",
+        "5",
+    )
+)
+
+AUTH_LOGIN_WINDOW_SECONDS = int(
+    os.getenv(
+        "APP_AUTH_LOGIN_WINDOW_SECONDS",
+        "300",
+    )
+)
+
+AUTH_TRUST_PROXY_HEADERS = env_flag(
+    "APP_AUTH_TRUST_PROXY_HEADERS",
+)
+
+AUTH_SESSION_VERSION = secrets.token_urlsafe(32)
+
+LOGIN_FAILURES: dict[str, list[float]] = {}
+LOGIN_FAILURES_LOCK = threading.Lock()
+MAX_LOGIN_SOURCES = 1000
+
+if AUTH_COOKIE_SAMESITE not in {
+    "lax",
+    "strict",
+    "none",
+}:
+    raise RuntimeError(
+        "APP_AUTH_COOKIE_SAMESITE deve ser lax, strict ou none."
+    )
+
+if AUTH_ENABLED:
+    if not AUTH_USERNAME or not AUTH_PASSWORD:
+        raise RuntimeError(
+            "APP_AUTH_USERNAME e APP_AUTH_PASSWORD são obrigatórios "
+            "quando APP_AUTH_ENABLED=true."
+        )
+
+    if len(AUTH_SESSION_SECRET) < 32:
+        raise RuntimeError(
+            "APP_AUTH_SESSION_SECRET deve ter pelo menos 32 caracteres."
+        )
+
+    if AUTH_SESSION_TTL_SECONDS <= 0:
+        raise RuntimeError(
+            "APP_AUTH_SESSION_TTL_SECONDS deve ser maior que zero."
+        )
+
+    if (
+        AUTH_LOGIN_MAX_ATTEMPTS <= 0
+        or AUTH_LOGIN_WINDOW_SECONDS <= 0
+    ):
+        raise RuntimeError(
+            "Os limites de tentativas de login devem ser maiores que zero."
+        )
+
+    if AUTH_COOKIE_SAMESITE == "none" and not AUTH_COOKIE_SECURE:
+        raise RuntimeError(
+            "Cookies SameSite=None exigem APP_AUTH_COOKIE_SECURE=true."
+        )
 
 
 # ==========================================================
@@ -296,6 +448,246 @@ app.mount(
 )
 
 
+def encode_session(
+    username: str,
+) -> str:
+
+    payload = json.dumps(
+        {
+            "username": username,
+            "expires_at": int(time.time())
+            + AUTH_SESSION_TTL_SECONDS,
+            "version": AUTH_SESSION_VERSION,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    encoded_payload = base64.urlsafe_b64encode(
+        payload
+    ).rstrip(b"=")
+
+    signature = hmac.new(
+        AUTH_SESSION_SECRET.encode("utf-8"),
+        encoded_payload,
+        hashlib.sha256,
+    ).digest()
+
+    encoded_signature = base64.urlsafe_b64encode(
+        signature
+    ).rstrip(b"=")
+
+    return (
+        encoded_payload.decode("ascii")
+        + "."
+        + encoded_signature.decode("ascii")
+    )
+
+
+def decode_session(
+    token: str,
+) -> str | None:
+
+    try:
+        encoded_payload, encoded_signature = token.split(
+            ".",
+            maxsplit=1,
+        )
+
+        expected_signature = hmac.new(
+            AUTH_SESSION_SECRET.encode("utf-8"),
+            encoded_payload.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+
+        supplied_signature = base64.urlsafe_b64decode(
+            encoded_signature
+            + "=" * (-len(encoded_signature) % 4)
+        )
+
+        if not hmac.compare_digest(
+            supplied_signature,
+            expected_signature,
+        ):
+            return None
+
+        payload = json.loads(
+            base64.urlsafe_b64decode(
+                encoded_payload
+                + "=" * (-len(encoded_payload) % 4)
+            )
+        )
+
+        if not isinstance(payload, dict):
+            return None
+
+        username = str(
+            payload.get("username") or ""
+        )
+        expires_at = int(
+            payload.get("expires_at") or 0
+        )
+        session_version = str(
+            payload.get("version") or ""
+        )
+
+        if (
+            not username
+            or username != AUTH_USERNAME
+            or expires_at <= int(time.time())
+            or not secrets.compare_digest(
+                session_version,
+                AUTH_SESSION_VERSION,
+            )
+        ):
+            return None
+
+        return username
+
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return None
+
+
+def authenticated_username(
+    request: Request,
+) -> str | None:
+
+    if not AUTH_ENABLED:
+        return AUTH_USERNAME or "local"
+
+    token = request.cookies.get(
+        AUTH_COOKIE_NAME,
+        "",
+    )
+
+    if not token:
+        return None
+
+    return decode_session(token)
+
+
+def origin_is_allowed(
+    request: Request,
+) -> bool:
+
+    origin = str(
+        request.headers.get("origin") or ""
+    ).strip().rstrip("/")
+
+    if not origin:
+        return not AUTH_ENABLED
+
+    if origin in CORS_ALLOWED_ORIGINS:
+        return True
+
+    origin_parts = urlsplit(origin)
+    request_host = str(
+        request.headers.get("host") or ""
+    ).casefold()
+
+    return (
+        origin_parts.scheme in {"http", "https"}
+        and origin_parts.netloc.casefold() == request_host
+    )
+
+
+def login_source(
+    request: Request,
+) -> str:
+
+    if AUTH_TRUST_PROXY_HEADERS:
+        forwarded = (
+            request.headers.get("cf-connecting-ip")
+            or request.headers.get("x-forwarded-for", "").split(",")[0]
+        ).strip()
+
+        if forwarded:
+            return forwarded
+
+    if request.client:
+        return request.client.host
+
+    return "unknown"
+
+
+def login_is_rate_limited(
+    request: Request,
+) -> bool:
+
+    key = login_source(request)
+    cutoff = time.monotonic() - AUTH_LOGIN_WINDOW_SECONDS
+
+    with LOGIN_FAILURES_LOCK:
+        attempts = [
+            attempted_at
+            for attempted_at in LOGIN_FAILURES.get(key, [])
+            if attempted_at > cutoff
+        ]
+        LOGIN_FAILURES[key] = attempts
+
+        return len(attempts) >= AUTH_LOGIN_MAX_ATTEMPTS
+
+
+def record_login_failure(
+    request: Request,
+) -> None:
+
+    key = login_source(request)
+
+    with LOGIN_FAILURES_LOCK:
+        if (
+            key not in LOGIN_FAILURES
+            and len(LOGIN_FAILURES) >= MAX_LOGIN_SOURCES
+        ):
+            LOGIN_FAILURES.pop(
+                next(iter(LOGIN_FAILURES))
+            )
+
+        LOGIN_FAILURES.setdefault(key, []).append(
+            time.monotonic()
+        )
+
+
+def clear_login_failures(
+    request: Request,
+) -> None:
+
+    key = login_source(request)
+
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.pop(key, None)
+
+
+def add_cors_middleware(
+    application: FastAPI,
+    origins: tuple[str, ...],
+) -> None:
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(origins),
+        allow_credentials=True,
+        allow_methods=[
+            "GET",
+            "POST",
+            "OPTIONS",
+        ],
+        allow_headers=[
+            "Accept",
+            "Content-Type",
+        ],
+        expose_headers=[
+            "Content-Disposition",
+        ],
+    )
+
+
 # StaticFiles não define Cache-Control por padrão. Sem isso, o
 # navegador pode reaproveitar app.js/style.css de uma visita
 # anterior mesmo depois de o arquivo mudar no servidor — a causa
@@ -313,9 +705,76 @@ async def _no_cache_for_assets(request, call_next):
     return response
 
 
+PUBLIC_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/session",
+}
+
+
+@app.middleware("http")
+async def _protect_api(request: Request, call_next):
+
+    path = request.url.path
+
+    if (
+        path.startswith("/api/")
+        and request.method not in {"GET", "HEAD", "OPTIONS"}
+        and not origin_is_allowed(request)
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "Origem não autorizada."
+            },
+        )
+
+    protected_path = (
+        path.startswith("/api/")
+        and path not in PUBLIC_API_PATHS
+    ) or path in {
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    }
+
+    if (
+        AUTH_ENABLED
+        and protected_path
+        and not authenticated_username(request)
+    ):
+        return JSONResponse(
+            status_code=401,
+            content={
+                "detail": "Autenticação necessária."
+            },
+        )
+
+    return await call_next(request)
+
+
+add_cors_middleware(
+    app,
+    CORS_ALLOWED_ORIGINS,
+)
+
+
 # ==========================================================
 # MODELOS
 # ==========================================================
+
+class AppLoginRequest(BaseModel):
+
+    username: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+
+    password: str = Field(
+        min_length=1,
+        max_length=1000,
+    )
+
 
 class LoginRequest(BaseModel):
 
@@ -409,6 +868,10 @@ class AnalyzeJWPlayerRequest(BaseModel):
 
 
 class StartEligibleRequest(BaseModel):
+
+    run_id: int = Field(
+        ge=1,
+    )
 
     provider: str = "Gemini"
 
@@ -977,6 +1440,114 @@ def health():
 
 
 # ==========================================================
+# AUTENTICAÇÃO DA APLICAÇÃO
+# ==========================================================
+
+@app.post("/api/auth/login")
+def app_login(
+    credentials: AppLoginRequest,
+    request: Request,
+):
+
+    if not AUTH_ENABLED:
+        return {
+            "auth_enabled": False,
+            "authenticated": True,
+            "username": AUTH_USERNAME or "local",
+        }
+
+    if login_is_rate_limited(
+        request,
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Muitas tentativas de login. Tente novamente mais tarde.",
+        )
+
+    valid_username = secrets.compare_digest(
+        credentials.username.encode("utf-8"),
+        AUTH_USERNAME.encode("utf-8"),
+    )
+    valid_password = secrets.compare_digest(
+        credentials.password.encode("utf-8"),
+        AUTH_PASSWORD.encode("utf-8"),
+    )
+
+    if not valid_username or not valid_password:
+        record_login_failure(
+            request,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Usuário ou senha inválidos.",
+        )
+
+    clear_login_failures(
+        request,
+    )
+
+    response = JSONResponse(
+        content={
+            "auth_enabled": True,
+            "authenticated": True,
+            "username": AUTH_USERNAME,
+        }
+    )
+
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=encode_session(AUTH_USERNAME),
+        max_age=AUTH_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite=AUTH_COOKIE_SAMESITE,
+        path="/",
+    )
+
+    return response
+
+
+@app.get("/api/auth/session")
+def app_session(
+    request: Request,
+):
+
+    username = authenticated_username(request)
+
+    return {
+        "auth_enabled": AUTH_ENABLED,
+        "authenticated": bool(username),
+        "username": username or "",
+    }
+
+
+@app.post("/api/auth/logout")
+def app_logout():
+
+    global AUTH_SESSION_VERSION
+
+    AUTH_SESSION_VERSION = secrets.token_urlsafe(32)
+
+    response = JSONResponse(
+        content={
+            "auth_enabled": AUTH_ENABLED,
+            "authenticated": False,
+            "username": "",
+        }
+    )
+
+    response.delete_cookie(
+        key=AUTH_COOKIE_NAME,
+        path="/",
+        secure=AUTH_COOKIE_SECURE,
+        httponly=True,
+        samesite=AUTH_COOKIE_SAMESITE,
+    )
+
+    return response
+
+
+# ==========================================================
 # STATUS DOS SERVIÇOS
 # ==========================================================
 #
@@ -1520,7 +2091,7 @@ async def import_and_process(
 # Botão "Iniciar análise": só é chamado depois que o usuário
 # revisou o resumo do filtro de publicação. Enfileira apenas
 # os JWPlayer IDs já marcados eligible_for_analysis=1 na
-# execução (run_id) atual — vídeos filtrados/sem data/erro
+# execução (run_id) confirmada — vídeos filtrados/sem data/erro
 # nunca chegam a este ponto.
 
 @app.post("/api/start-eligible")
@@ -1541,7 +2112,9 @@ def start_eligible(
 
         jwplayer_id
 
-        for jwplayer_id in DATABASE.eligible_media_for_current_run()
+        for jwplayer_id in DATABASE.eligible_media_for_run(
+            request.run_id
+        )
 
         if states.get(
             jwplayer_id
@@ -3231,9 +3804,9 @@ def export_csv(year: str = ""):
 
 
 @app.get("/api/export.xlsx")
-def export_xlsx():
+def export_xlsx(year: str = ""):
 
-    rows = _rows_for_export()
+    rows = _rows_for_export(year=year)
 
     workbook = Workbook()
 

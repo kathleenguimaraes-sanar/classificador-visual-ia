@@ -1,0 +1,35 @@
+name: cetruslabia
+
+services:
+  backend:
+    image: cetruslabia-backend:${CETRUS_IMAGE_TAG:-local}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 2m
+    env_file:
+      - ${CETRUS_ENV_FILE:-/srv/pirata/cetruslabia/backend.env}
+    environment:
+      CETRUS_DATA_DIR: /app/data
+    ports:
+      - "127.0.0.1:${CETRUS_HOST_PORT:-8106}:8000"
+    volumes:
+      - type: bind
+        source: ${CETRUS_DATA_HOST_DIR:-/srv/pirata/cetruslabia/data}
+        target: /app/data
+    shm_size: 256m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3);
+          raise SystemExit(0 if response.status == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
