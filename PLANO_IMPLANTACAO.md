@@ -25,8 +25,8 @@ A branch `main` somente sera alterada no final, depois da homologacao. Desenvolv
 - [x] Testes frontend e backend aprovados.
 - [x] Imagem Docker construida.
 - [x] Primeiro commit local criado: `0a9c2f9`.
-- [ ] Branch publicada no GitHub.
-- [ ] Pull Request aberto.
+- [x] Branch publicada no GitHub.
+- [x] Pull Request draft aberto: https://github.com/kathleenguimaraes-sanar/CetrusLabIA/pull/1.
 - [ ] Backend instalado na maquina Pirata.
 - [ ] Frontend publicado no Lovable.
 - [ ] Homologacao ponta a ponta concluida.
@@ -41,9 +41,9 @@ Objetivo: deixar a nova arquitetura revisavel no GitHub sem alterar a `main`.
 - [x] Revisar seguranca e migracao de dados.
 - [x] Executar testes e build.
 - [x] Criar commit na branch de feature.
-- [ ] Autenticar a conta GitHub do responsavel.
-- [ ] Fazer push de `feat/lovable-backend-split`.
-- [ ] Abrir PR para `main`, sem fazer merge.
+- [x] Autenticar a conta GitHub do responsavel.
+- [x] Fazer push de `feat/lovable-backend-split`.
+- [x] Abrir PR para `main`, sem fazer merge.
 
 Criterio de conclusao: branch remota e PR disponiveis para revisao, enquanto `main` permanece no commit anterior.
 
