@@ -424,19 +424,25 @@ label select {
 
 /*
    IMPORTANTE:
-   A Etapa 4 possui 8 colunas:
+   A Etapa 4 possui 11 colunas:
 
-   1 - Nome da aula
-   2 - Professor
-   3 - Modelo
-   4 - Resumo
-   5 - Duração do vídeo
-   6 - Status
-   7 - Detalhes
-   8 - JWPlayer ID
+   1  - Nome da aula
+   2  - Professor
+   3  - Modelo
+   4  - Resumo
+   5  - Duração do vídeo
+   6  - Status
+   7  - Detalhes
+   8  - Macrotema
+   9  - Microtema
+   10 - Nanotema
+   11 - JWPlayer ID
 
    A tabela utiliza layout fixo para impedir que o Resumo
-   fique espremido em uma coluna extremamente estreita.
+   fique espremido em uma coluna extremamente estreita, e
+   para que cada coluna receba uma largura previsível — sem
+   isso, colunas adicionadas depois (Macrotema/Microtema/
+   Nanotema) quebram o cabeçalho e sobrepõem texto.
 */
 
 .table-wrap {
@@ -450,49 +456,49 @@ label select {
 }
 
 /*
-   A tabela precisa ter uma largura mínima para preservar
-   uma distribuição confortável das 8 colunas.
+   A tabela precisa ter uma largura mínima maior agora que
+   são 11 colunas, para preservar uma distribuição confortável.
 */
 .table-wrap table {
   width: 100%;
-  min-width: 1080px;
+  min-width: 1420px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 13px;
 }
 
 /*
-   Distribuição das colunas.
-   O Resumo recebe a maior área disponível.
+   Distribuição das colunas (soma = 100%).
+   O Resumo continua recebendo a maior área disponível.
 */
 .table-wrap th:nth-child(1),
 .table-wrap td:nth-child(1) {
-  width: 22%;
+  width: 15%;
 }
 
 .table-wrap th:nth-child(2),
 .table-wrap td:nth-child(2) {
-  width: 13%;
+  width: 9%;
 }
 
 .table-wrap th:nth-child(3),
 .table-wrap td:nth-child(3) {
-  width: 15%;
+  width: 10%;
 }
 
 .table-wrap th:nth-child(4),
 .table-wrap td:nth-child(4) {
-  width: 26%;
+  width: 18%;
 }
 
 .table-wrap th:nth-child(5),
 .table-wrap td:nth-child(5) {
-  width: 9%;
+  width: 6%;
 }
 
 .table-wrap th:nth-child(6),
 .table-wrap td:nth-child(6) {
-  width: 7%;
+  width: 6%;
 }
 
 .table-wrap th:nth-child(7),
@@ -502,6 +508,21 @@ label select {
 
 .table-wrap th:nth-child(8),
 .table-wrap td:nth-child(8) {
+  width: 9%;
+}
+
+.table-wrap th:nth-child(9),
+.table-wrap td:nth-child(9) {
+  width: 9%;
+}
+
+.table-wrap th:nth-child(10),
+.table-wrap td:nth-child(10) {
+  width: 9%;
+}
+
+.table-wrap th:nth-child(11),
+.table-wrap td:nth-child(11) {
   width: 10%;
 }
 
@@ -598,10 +619,21 @@ label select {
 }
 
 /*
-   JWPlayer ID:
+   Macrotema / Microtema / Nanotema:
+   texto curto, mas pode quebrar linha se necessário.
+*/
+.table-wrap td:nth-child(8),
+.table-wrap td:nth-child(9),
+.table-wrap td:nth-child(10) {
+  color: #536473;
+  overflow-wrap: anywhere;
+}
+
+/*
+   JWPlayer ID (agora coluna 11):
    não deve quebrar o identificador em várias linhas.
 */
-.table-wrap td:nth-child(8) {
+.table-wrap td:nth-child(11) {
   white-space: nowrap;
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
@@ -874,11 +906,6 @@ label select {
   color: var(--green);
 }
 
-.status-icon.connected {
-  background: #e5f5ef;
-  color: var(--green);
-}
-
 /* ==========================================================
    ESTADO VAZIO
    ========================================================== */
@@ -923,7 +950,7 @@ label select {
   }
 
   .table-wrap table {
-    min-width: 1050px;
+    min-width: 1350px;
   }
 
   .table-wrap th,
@@ -1018,6 +1045,6 @@ label select {
   }
 
   .table-wrap table {
-    min-width: 980px;
+    min-width: 1300px;
   }
 }

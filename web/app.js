@@ -1151,6 +1151,35 @@ function updateExportCsvLink() {
         : '/api/export.csv';
 }
 
+// ==========================================================
+// BUSCA GERAL (campo "Filtrar por professor")
+// ==========================================================
+//
+// O campo de busca deixou de olhar somente para o nome do
+// professor: agora ele varre, em conjunto, todos os campos
+// relevantes de cada linha (professor, nome da aula, modelo/
+// classificação, macrotema, microtema, nanotema, resumo e
+// JWPlayer ID). Basta digitar um trecho de qualquer um desses
+// campos para encontrar a linha.
+
+function buildSearchableText(video) {
+    return [
+        video.professor_name,
+        video.lesson_name,
+        video.video,
+        video.final_category,
+        video.category,
+        video.macrotema,
+        video.microtema,
+        video.nanotema,
+        video.summary,
+        video.jwplayer_id
+    ]
+        .filter(Boolean)
+        .join(' \u0000 ')
+        .toLowerCase();
+}
+
 function applyResultFilters() {
     const professorFilter = $('#professor-filter');
     const yearFilter = $('#year-filter');
@@ -1165,18 +1194,16 @@ function applyResultFilters() {
         : '';
 
     const items = loadedVideos.filter((video) => {
-        const matchesProfessor =
+        const matchesSearch =
             !needle ||
-            (video.professor_name || '')
-                .toLowerCase()
-                .includes(needle);
+            buildSearchableText(video).includes(needle);
 
         const matchesYear =
             !year ||
             publishDateYear(video.publish_date) ===
                 Number(year);
 
-        return matchesProfessor && matchesYear;
+        return matchesSearch && matchesYear;
     });
 
     renderVideos(items);
@@ -2571,10 +2598,7 @@ function startJobsAutoRefresh() {
                 loadJobs();
                 loadStats();
 
-                // Reaproveita o mesmo polling já existente
-                // (nenhum timer novo) para manter a tabela e o
-                // andamento geral da Etapa 4 atualizados
-                // automaticamente enquanto os vídeos processam.
+
                 loadVideos();
             },
             5000
