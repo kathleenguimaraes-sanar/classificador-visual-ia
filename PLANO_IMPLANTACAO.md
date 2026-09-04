@@ -85,7 +85,7 @@ Criterio de conclusao: backend responde internamente, exige autenticacao, preser
 Objetivo: disponibilizar a API na internet sem expor diretamente a maquina Pirata.
 
 - [x] Definir a URL da API: `cetruslabia.tech-pirata.workers.dev`.
-- [ ] Adicionar `cetruslabia:8106` ao estado desejado de `tunnel/cloudflare/reconcile.sh` no mesmo MR da stack.
+- [ ] Depois de validar a stack, adicionar `cetruslabia:8106` ao estado desejado de `tunnel/cloudflare/reconcile.sh` em uma alteracao separada.
 - [ ] Criar Worker e binding de VPC Service pelo fluxo do `cluster-stacks`.
 - [x] Escolher o Cloudflare Tunnel existente `piratas-fisica`.
 - [x] Proibir quick tunnel e acesso do Worker a `<uuid>.cfargotunnel.com`.

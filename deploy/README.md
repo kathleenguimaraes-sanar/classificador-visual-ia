@@ -8,11 +8,11 @@ Antes de qualquer operacao na maquina Pirata, carregue a skill `maquina-pirata`.
 
 1. Finalize e homologue o commit da aplicacao.
 2. Crie ou ajuste a stack `cetruslabia` no `cluster-stacks`.
-3. Versione `stack.yml`, `secrets.map`, persistencia, healthcheck e configuracao do tunnel.
+3. Versione `stack.yml`, `secrets.map`, persistencia e healthcheck, sem expor o servico ainda.
 4. Abra MR e aguarde o CI ficar verde.
 5. Envie o MR e o nome da stack ao Pedro Mascarenhas para revisao.
 6. Somente depois da aprovacao e do merge, deixe o runner `pirata-fisica` fazer o deploy e as verificacoes.
-7. Publique o frontend Lovable apenas depois de o servico estar saudavel.
+7. Depois de o servico estar saudavel, abra uma alteracao separada para Worker/VPC Service e publique o frontend Lovable.
 
 Hermes nao participa deste servico, pois ele nao e um servico de agente.
 
