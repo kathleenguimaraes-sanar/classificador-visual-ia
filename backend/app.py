@@ -128,8 +128,8 @@ def configured_origins() -> tuple[str, ...]:
 
     if "*" in origins:
         raise RuntimeError(
-            "CORS_ALLOWED_ORIGINS não pode usar '*' quando cookies "
-            "de autenticação estão habilitados."
+            "CORS_ALLOWED_ORIGINS não pode usar '*' em requisições "
+            "autenticadas."
         )
 
     return origins
@@ -161,21 +161,6 @@ AUTH_SESSION_TTL_SECONDS = int(
     )
 )
 
-AUTH_COOKIE_NAME = os.getenv(
-    "APP_AUTH_COOKIE_NAME",
-    "cetrus_session",
-).strip()
-
-AUTH_COOKIE_SECURE = env_flag(
-    "APP_AUTH_COOKIE_SECURE",
-    "true",
-)
-
-AUTH_COOKIE_SAMESITE = os.getenv(
-    "APP_AUTH_COOKIE_SAMESITE",
-    "lax",
-).strip().casefold()
-
 AUTH_LOGIN_MAX_ATTEMPTS = int(
     os.getenv(
         "APP_AUTH_LOGIN_MAX_ATTEMPTS",
@@ -199,15 +184,6 @@ AUTH_SESSION_VERSION = secrets.token_urlsafe(32)
 LOGIN_FAILURES: dict[str, list[float]] = {}
 LOGIN_FAILURES_LOCK = threading.Lock()
 MAX_LOGIN_SOURCES = 1000
-
-if AUTH_COOKIE_SAMESITE not in {
-    "lax",
-    "strict",
-    "none",
-}:
-    raise RuntimeError(
-        "APP_AUTH_COOKIE_SAMESITE deve ser lax, strict ou none."
-    )
 
 if AUTH_ENABLED:
     if not AUTH_USERNAME or not AUTH_PASSWORD:
@@ -233,12 +209,6 @@ if AUTH_ENABLED:
         raise RuntimeError(
             "Os limites de tentativas de login devem ser maiores que zero."
         )
-
-    if AUTH_COOKIE_SAMESITE == "none" and not AUTH_COOKIE_SECURE:
-        raise RuntimeError(
-            "Cookies SameSite=None exigem APP_AUTH_COOKIE_SECURE=true."
-        )
-
 
 # ==========================================================
 # BIBLIOTECAS JW PLAYER
@@ -561,15 +531,19 @@ def authenticated_username(
     if not AUTH_ENABLED:
         return AUTH_USERNAME or "local"
 
-    token = request.cookies.get(
-        AUTH_COOKIE_NAME,
+    parts = request.headers.get(
+        "authorization",
         "",
-    )
+    ).split()
 
-    if not token:
+    if (
+        len(parts) != 2
+        or parts[0].casefold() != "bearer"
+        or not parts[1]
+    ):
         return None
 
-    return decode_session(token)
+    return decode_session(parts[1])
 
 
 def origin_is_allowed(
@@ -672,7 +646,7 @@ def add_cors_middleware(
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(origins),
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=[
             "GET",
             "POST",
@@ -680,6 +654,7 @@ def add_cors_middleware(
         ],
         allow_headers=[
             "Accept",
+            "Authorization",
             "Content-Type",
         ],
         expose_headers=[
@@ -707,7 +682,6 @@ async def _no_cache_for_assets(request, call_next):
 
 PUBLIC_API_PATHS = {
     "/api/auth/login",
-    "/api/auth/logout",
     "/api/auth/session",
 }
 
@@ -1418,6 +1392,12 @@ def check_publish_dates(
 @app.get("/")
 def home():
 
+    if AUTH_ENABLED:
+        raise HTTPException(
+            status_code=404,
+            detail="Interface local desabilitada.",
+        )
+
     return FileResponse(
         WEB_DIR / "index.html"
     )
@@ -1486,25 +1466,14 @@ def app_login(
         request,
     )
 
-    response = JSONResponse(
-        content={
-            "auth_enabled": True,
-            "authenticated": True,
-            "username": AUTH_USERNAME,
-        }
-    )
-
-    response.set_cookie(
-        key=AUTH_COOKIE_NAME,
-        value=encode_session(AUTH_USERNAME),
-        max_age=AUTH_SESSION_TTL_SECONDS,
-        httponly=True,
-        secure=AUTH_COOKIE_SECURE,
-        samesite=AUTH_COOKIE_SAMESITE,
-        path="/",
-    )
-
-    return response
+    return {
+        "auth_enabled": True,
+        "authenticated": True,
+        "username": AUTH_USERNAME,
+        "access_token": encode_session(AUTH_USERNAME),
+        "token_type": "Bearer",
+        "expires_in": AUTH_SESSION_TTL_SECONDS,
+    }
 
 
 @app.get("/api/auth/session")
@@ -1528,23 +1497,11 @@ def app_logout():
 
     AUTH_SESSION_VERSION = secrets.token_urlsafe(32)
 
-    response = JSONResponse(
-        content={
-            "auth_enabled": AUTH_ENABLED,
-            "authenticated": False,
-            "username": "",
-        }
-    )
-
-    response.delete_cookie(
-        key=AUTH_COOKIE_NAME,
-        path="/",
-        secure=AUTH_COOKIE_SECURE,
-        httponly=True,
-        samesite=AUTH_COOKIE_SAMESITE,
-    )
-
-    return response
+    return {
+        "auth_enabled": AUTH_ENABLED,
+        "authenticated": False,
+        "username": "",
+    }
 
 
 # ==========================================================

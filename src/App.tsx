@@ -432,10 +432,15 @@ export default function App() {
   async function logout() {
     setBusy("logout");
     try {
-      setSession(await backend.logout());
+      await backend.logout();
     } catch (error) {
       notify(errorMessage(error), "danger");
     } finally {
+      setSession((current) => ({
+        auth_enabled: current?.auth_enabled ?? true,
+        authenticated: false,
+        username: "",
+      }));
       setBusy("");
     }
   }

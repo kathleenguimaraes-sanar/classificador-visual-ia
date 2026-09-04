@@ -20,8 +20,6 @@ class SecurityTests(unittest.TestCase):
             AUTH_PASSWORD="senha-segura-de-teste",
             AUTH_SESSION_SECRET="s" * 32,
             AUTH_SESSION_TTL_SECONDS=3600,
-            AUTH_COOKIE_SECURE=False,
-            AUTH_COOKIE_SAMESITE="lax",
             CORS_ALLOWED_ORIGINS=("https://frontend.example",),
         )
 
@@ -48,10 +46,18 @@ class SecurityTests(unittest.TestCase):
             )
 
             self.assertEqual(login.status_code, 200)
-            self.assertIn("HttpOnly", login.headers["set-cookie"])
-            self.assertIn("SameSite=lax", login.headers["set-cookie"])
+            token = login.json()["access_token"]
+            self.assertEqual(login.json()["token_type"], "Bearer")
+            self.assertEqual(login.json()["expires_in"], 3600)
+            self.assertNotIn("set-cookie", login.headers)
+            auth_headers = {
+                "Authorization": f"Bearer {token}"
+            }
 
-            session = client.get("/api/auth/session")
+            session = client.get(
+                "/api/auth/session",
+                headers=auth_headers,
+            )
             self.assertEqual(
                 session.json(),
                 {
@@ -60,26 +66,37 @@ class SecurityTests(unittest.TestCase):
                     "username": "operador",
                 },
             )
-            self.assertEqual(client.get("/api/status").status_code, 200)
+            self.assertEqual(
+                client.get(
+                    "/api/status",
+                    headers=auth_headers,
+                ).status_code,
+                200,
+            )
 
-            copied_session = client.cookies.get(
-                app_module.AUTH_COOKIE_NAME
-            )
             second_client = TestClient(app_module.app)
-            second_client.cookies.set(
-                app_module.AUTH_COOKIE_NAME,
-                copied_session,
-            )
 
             logout = client.post(
                 "/api/auth/logout",
-                headers={"Origin": "https://frontend.example"},
+                headers={
+                    "Origin": "https://frontend.example",
+                    **auth_headers,
+                },
             )
             self.assertEqual(logout.status_code, 200)
             self.assertFalse(logout.json()["authenticated"])
-            self.assertEqual(client.get("/api/status").status_code, 401)
             self.assertEqual(
-                second_client.get("/api/status").status_code,
+                client.get(
+                    "/api/status",
+                    headers=auth_headers,
+                ).status_code,
+                401,
+            )
+            self.assertEqual(
+                second_client.get(
+                    "/api/status",
+                    headers=auth_headers,
+                ).status_code,
                 401,
             )
 
@@ -96,7 +113,7 @@ class SecurityTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 401)
-        self.assertNotIn(app_module.AUTH_COOKIE_NAME, client.cookies)
+        self.assertNotIn("access_token", response.json())
 
     def test_unicode_credentials_are_supported(self):
         with self.auth_config(), patch.multiple(
@@ -169,11 +186,55 @@ class SecurityTests(unittest.TestCase):
 
     def test_tampered_session_is_rejected(self):
         with self.auth_config():
-            client = TestClient(app_module.app)
-            client.cookies.set(app_module.AUTH_COOKIE_NAME, "payload.invalida")
-            response = client.get("/api/status")
+            response = TestClient(app_module.app).get(
+                "/api/status",
+                headers={"Authorization": "Bearer payload.invalida"},
+            )
 
         self.assertEqual(response.status_code, 401)
+
+    def test_malformed_authorization_headers_are_rejected(self):
+        with self.auth_config():
+            client = TestClient(app_module.app)
+            headers = [
+                {"Authorization": "Basic credential"},
+                {"Authorization": "Bearer"},
+                {"Authorization": "Bearer token extra"},
+            ]
+            statuses = [
+                client.get("/api/status", headers=item).status_code
+                for item in headers
+            ]
+
+        self.assertEqual(statuses, [401, 401, 401])
+
+    def test_logout_requires_a_valid_token(self):
+        with self.auth_config():
+            response = TestClient(app_module.app).post(
+                "/api/auth/logout",
+                headers={"Origin": "https://frontend.example"},
+            )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_expired_bearer_token_is_rejected(self):
+        with self.auth_config():
+            now = app_module.time.time()
+            token = app_module.encode_session("operador")
+            with patch.object(
+                app_module.time,
+                "time",
+                return_value=now + 3601,
+            ):
+                username = app_module.decode_session(token)
+
+        self.assertIsNone(username)
+
+    def test_legacy_ui_is_hidden_when_authentication_is_enabled(self):
+        with self.auth_config():
+            response = TestClient(app_module.app).get("/")
+
+        self.assertEqual(response.status_code, 404)
 
     def test_cors_preflight_allows_configured_origin(self):
         cors_app = FastAPI()
@@ -191,7 +252,9 @@ class SecurityTests(unittest.TestCase):
             headers={
                 "Origin": "https://frontend.example",
                 "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "content-type",
+                "Access-Control-Request-Headers": (
+                    "authorization,content-type"
+                ),
             },
         )
 
@@ -200,9 +263,13 @@ class SecurityTests(unittest.TestCase):
             response.headers["access-control-allow-origin"],
             "https://frontend.example",
         )
-        self.assertEqual(
-            response.headers["access-control-allow-credentials"],
-            "true",
+        self.assertNotIn(
+            "access-control-allow-credentials",
+            response.headers,
+        )
+        self.assertIn(
+            "authorization",
+            response.headers["access-control-allow-headers"].casefold(),
         )
         self.assertIn(
             "content-type",
@@ -216,6 +283,38 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(
             resource_response.headers["access-control-expose-headers"],
             "Content-Disposition",
+        )
+
+    def test_cors_preflight_reaches_protected_api_without_token(self):
+        protected_app = FastAPI()
+        protected_app.middleware("http")(
+            app_module._protect_api
+        )
+        app_module.add_cors_middleware(
+            protected_app,
+            ("https://frontend.example",),
+        )
+
+        @protected_app.post("/api/start-eligible")
+        def start_eligible():
+            return {"ok": True}
+
+        with self.auth_config():
+            response = TestClient(protected_app).options(
+                "/api/start-eligible",
+                headers={
+                    "Origin": "https://frontend.example",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": (
+                        "authorization,content-type"
+                    ),
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "https://frontend.example",
         )
 
     def test_configured_origins_normalizes_values(self):

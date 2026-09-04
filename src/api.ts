@@ -8,6 +8,13 @@ import type {
 } from "./types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+let accessToken: string | null = null;
+
+interface LoginResponse extends AuthSession {
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -23,17 +30,24 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+export function clearAccessToken() {
+  accessToken = null;
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   const isFormData = init.body instanceof FormData;
+  const requestAccessToken = accessToken;
 
   if (init.body && !isFormData && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  if (requestAccessToken && !path.endsWith("/auth/login")) {
+    headers.set("Authorization", `Bearer ${requestAccessToken}`);
+  }
 
   const response = await fetch(apiUrl(path), {
     ...init,
-    credentials: "include",
     headers,
   });
 
@@ -52,7 +66,12 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
         ? String((body as { detail: unknown }).detail)
         : `A API respondeu com status ${response.status}.`;
 
-    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+    if (
+      response.status === 401
+      && !path.startsWith("/api/auth/")
+      && accessToken === requestAccessToken
+    ) {
+      clearAccessToken();
       window.dispatchEvent(new Event("cetrus:unauthorized"));
     }
 
@@ -64,12 +83,26 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const backend = {
   session: () => api<AuthSession>("/api/auth/session"),
-  login: (username: string, password: string) =>
-    api<AuthSession>("/api/auth/login", {
+  login: async (username: string, password: string) => {
+    clearAccessToken();
+    const result = await api<LoginResponse>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
-    }),
-  logout: () => api<AuthSession>("/api/auth/logout", { method: "POST" }),
+    });
+    accessToken = result.access_token ?? null;
+    return {
+      auth_enabled: result.auth_enabled,
+      authenticated: result.authenticated,
+      username: result.username,
+    };
+  },
+  logout: async () => {
+    try {
+      return await api<AuthSession>("/api/auth/logout", { method: "POST" });
+    } finally {
+      clearAccessToken();
+    }
+  },
   status: () => api<ServiceStatus>("/api/status"),
   jwStatus: (library: string, propertyId: string, verify = false) =>
     api<JWStatus>(
@@ -120,12 +153,16 @@ export const backend = {
 
 export async function downloadExport(format: "csv" | "xlsx", year = "") {
   const params = year ? `?year=${encodeURIComponent(year)}` : "";
+  const requestAccessToken = accessToken;
+  const headers = new Headers();
+  if (requestAccessToken) headers.set("Authorization", `Bearer ${requestAccessToken}`);
   const response = await fetch(apiUrl(`/api/export.${format}${params}`), {
-    credentials: "include",
+    headers,
   });
 
   if (!response.ok) {
-    if (response.status === 401) {
+    if (response.status === 401 && accessToken === requestAccessToken) {
+      clearAccessToken();
       window.dispatchEvent(new Event("cetrus:unauthorized"));
     }
     throw new ApiError("Não foi possível gerar a exportação.", response.status);
