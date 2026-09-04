@@ -6,9 +6,9 @@ Hospedar o frontend React no Lovable e executar o backend FastAPI na maquina Pir
 
 Arquitetura pretendida:
 
-- frontend: Lovable, em dominio proprio;
-- backend: container Docker na maquina Pirata;
-- comunicacao: API HTTPS com cookie de sessao `HttpOnly`;
+- frontend: Lovable em `https://cetruslabia.lovable.app`;
+- backend: container Docker na maquina Pirata, publicado em `https://cetruslabia.tech-pirata.workers.dev`;
+- comunicacao: API HTTPS com token Bearer mantido somente em memoria;
 - persistencia: volume local da maquina Pirata;
 - codigo: monorepo no GitHub.
 
@@ -27,8 +27,9 @@ A branch `main` somente sera alterada no final, depois da homologacao. Desenvolv
 - [x] Primeiro commit local criado: `0a9c2f9`.
 - [x] Branch publicada no GitHub.
 - [x] Pull Request draft aberto: https://github.com/kathleenguimaraes-sanar/CetrusLabIA/pull/1.
-- [x] Artefatos operacionais do backend preparados em `deploy/`.
-- [ ] Backend instalado na maquina Pirata.
+- [x] Contrato operacional do backend documentado em `deploy/`.
+- [ ] Stack `cetruslabia` versionada no `cluster-stacks` e enviada para revisao.
+- [ ] Backend implantado pelo CI do runner `pirata-fisica`.
 - [ ] Frontend publicado no Lovable.
 - [ ] Homologacao ponta a ponta concluida.
 - [ ] Merge final na `main` autorizado.
@@ -48,32 +49,22 @@ Objetivo: deixar a nova arquitetura revisavel no GitHub sem alterar a `main`.
 
 Criterio de conclusao: branch remota e PR disponiveis para revisao, enquanto `main` permanece no commit anterior.
 
-## Macropasso 2 - Preparar a maquina Pirata
+## Macropasso 2 - Implantar o servico pela stack
 
-Objetivo: garantir que a maquina consiga executar o backend continuamente e preservar dados.
+Objetivo: versionar a operacao do backend no `cluster-stacks`, sem instalacao ou configuracao manual na maquina Pirata.
 
-Levantamento de 2026-09-04:
+- [x] Confirmar Docker Swarm, capacidade e porta candidata `8106`.
+- [ ] Carregar a skill `maquina-pirata` antes de qualquer operacao de infraestrutura.
+- [ ] Criar a stack `cetruslabia` no repositorio `sanardigital/pirata/infra-pirata/cluster-stacks`.
+- [ ] Configurar persistencia para `/app/data`, healthcheck e restart policy.
+- [ ] Mapear credenciais do 1Password em `secrets.map` e Docker Secrets.
+- [ ] Abrir MR e aguardar o CI verde.
+- [ ] Enviar o MR e o nome da stack ao Pedro Mascarenhas para revisao.
+- [ ] Fazer merge somente depois da aprovacao.
+- [ ] Deixar o runner `pirata-fisica` realizar o deploy e a verificacao.
+- [ ] Validar `/health`, logs, backup, persistencia e restart.
 
-- Ubuntu 26.04 LTS `x86_64`, 8 CPUs, 30 GiB de RAM e 4 GiB de swap;
-- Docker 29.6.2 e Compose 5.3.1, com Swarm single-node ativo;
-- 88 GiB livres na particao principal;
-- porta `8000` ocupada e `8106` livre no momento da inspecao;
-- Cloudflare Tunnel existente executando na rede do host;
-- nenhuma instalacao anterior do CetrusLabIA localizada.
-
-Decisao atual: executar o backend por Docker Compose standalone, isolado das stacks Swarm, com bind somente em `127.0.0.1:8106`. O tunnel podera acessar essa porta pela rede do host sem conectar o CetrusLabIA as redes dos outros servicos.
-
-- [x] Confirmar sistema operacional, acesso administrativo e arquitetura da maquina.
-- [x] Confirmar Docker e Docker Compose.
-- [ ] Desabilitar suspensao automatica da maquina.
-- [ ] Definir diretorio permanente da aplicacao.
-- [ ] Localizar o banco `portfolio.db` e demais dados existentes.
-- [ ] Fazer backup antes da migracao.
-- [ ] Definir volume persistente para `/app/data`.
-- [ ] Criar `backend/.env` fora do Git com as configuracoes reais.
-- [ ] Configurar reinicio automatico do container.
-- [ ] Subir o backend usando a branch ou o commit homologado.
-- [ ] Validar `/health`, logs e reinicio da maquina.
+Hermes nao participa deste deploy porque o CetrusLabIA nao e um servico de agente.
 
 Variaveis obrigatorias para producao:
 
@@ -81,13 +72,11 @@ Variaveis obrigatorias para producao:
 - `APP_AUTH_USERNAME`;
 - `APP_AUTH_PASSWORD`;
 - `APP_AUTH_SESSION_SECRET`;
-- `APP_AUTH_COOKIE_SECURE=true`;
-- `APP_AUTH_COOKIE_SAMESITE=lax`;
 - `CORS_ALLOWED_ORIGINS`;
 - `CETRUS_DATA_DIR`;
 - chaves dos provedores de IA utilizados.
 
-Segredos nunca devem ser enviados por chat ou adicionados ao Git.
+Segredos devem sair do 1Password diretamente para Docker Secrets. Seus valores nunca devem passar por chat, Git, CI ou arquivo.
 
 Criterio de conclusao: backend responde internamente, exige autenticacao, preserva dados e volta automaticamente depois de reiniciar a maquina.
 
@@ -95,15 +84,18 @@ Criterio de conclusao: backend responde internamente, exige autenticacao, preser
 
 Objetivo: disponibilizar a API na internet sem expor diretamente a maquina Pirata.
 
-- [ ] Definir o dominio principal da aplicacao.
-- [ ] Reservar um subdominio para a API, como `api.cetruslabia.exemplo.com`.
-- [ ] Escolher Cloudflare Tunnel ou reverse proxy equivalente.
+- [x] Definir a URL da API: `cetruslabia.tech-pirata.workers.dev`.
+- [ ] Adicionar `cetruslabia:8106` ao estado desejado de `tunnel/cloudflare/reconcile.sh` no mesmo MR da stack.
+- [ ] Criar Worker e binding de VPC Service pelo fluxo do `cluster-stacks`.
+- [x] Escolher o Cloudflare Tunnel existente `piratas-fisica`.
+- [x] Proibir quick tunnel e acesso do Worker a `<uuid>.cfargotunnel.com`.
 - [ ] Configurar DNS e certificado HTTPS.
 - [ ] Encaminhar apenas HTTPS para o backend local.
 - [ ] Manter a porta `8000` fechada para acesso publico direto.
 - [ ] Ativar `APP_AUTH_TRUST_PROXY_HEADERS=true` somente se todo acesso passar pelo proxy confiavel.
 - [ ] Validar CORS com a origem exata do frontend.
 - [ ] Validar rate limiting e logs de acesso.
+- [ ] Confirmar que trabalhos longos usam jobs assincronos e nao dependem de uma requisicao aberta no edge.
 
 Criterio de conclusao: `/health` responde por HTTPS, rotas privadas devolvem `401` sem sessao e somente o frontend autorizado recebe cabecalhos CORS.
 
@@ -111,17 +103,19 @@ Criterio de conclusao: `/health` responde por HTTPS, rotas privadas devolvem `40
 
 Objetivo: disponibilizar a interface React conectada ao backend da Pirata.
 
+Este macropasso comeca somente depois de o backend estar implantado e saudavel.
+
 - [ ] Criar ou selecionar o projeto no Lovable.
 - [ ] Conectar o repositorio GitHub.
 - [ ] Usar a branch de feature durante a homologacao, se o Lovable permitir.
-- [ ] Configurar `VITE_API_BASE_URL` com a URL HTTPS da API.
-- [ ] Publicar o frontend em dominio proprio, como `cetruslabia.exemplo.com`.
+- [x] Configurar `VITE_API_BASE_URL=https://cetruslabia.tech-pirata.workers.dev` para producao.
+- [ ] Publicar o frontend em `cetruslabia.lovable.app`.
 - [ ] Configurar esse dominio em `CORS_ALLOWED_ORIGINS` no backend.
 - [ ] Confirmar que alteracoes do Lovable nao removem nem sobrescrevem `backend/`.
 
-Frontend e API devem compartilhar o mesmo dominio registravel para o cookie `SameSite=Lax`. Um frontend em `*.lovable.app` chamando uma API em outro dominio nao e uma configuracao confiavel para a autenticacao de producao.
+Frontend e API usam dominios registraveis diferentes. Por isso, a autenticacao usa token Bearer somente em memoria e nao depende de cookies de terceiros. Recarregar a pagina exige novo login.
 
-Criterio de conclusao: usuario entra pelo dominio do frontend, autentica e acessa a API sem erros de cookie ou CORS.
+Criterio de conclusao: usuario entra pelo frontend, autentica e acessa a API com Bearer sem erros de CORS.
 
 ## Macropasso 5 - Homologar ponta a ponta
 
@@ -171,7 +165,7 @@ Criterio de conclusao: `main`, Lovable e Pirata executam a mesma versao homologa
 - conta GitHub com acesso de escrita ao repositorio;
 - sistema operacional e forma de acesso a maquina Pirata;
 - local atual do banco e dos arquivos persistentes;
-- dominio escolhido e provedor de DNS;
+- acesso ao estado desejado Cloudflare do tunnel `piratas-fisica`;
 - acesso ao Cloudflare ou proxy escolhido;
 - projeto e conta do Lovable;
 - provedores de IA que serao habilitados;
@@ -181,9 +175,9 @@ Criterio de conclusao: `main`, Lovable e Pirata executam a mesma versao homologa
 
 Depois do macropasso 1, ainda antes de termos todos os acessos externos, podemos preparar:
 
-- [x] arquivo Docker Compose para a maquina Pirata;
-- [x] checklist de instalacao e verificacao de deploy;
-- modelo de configuracao de proxy/tunel sem segredos;
+- [x] contrato da stack para o repositorio `cluster-stacks`;
+- [x] checklist de deploy e verificacao pelo CI;
+- [x] modelo de configuracao do Worker/VPC Service sem segredos;
 - workflow de CI para testes de frontend e backend;
 - [x] procedimento de backup e restauracao do SQLite;
 - guia de configuracao do Lovable e das variaveis de ambiente.

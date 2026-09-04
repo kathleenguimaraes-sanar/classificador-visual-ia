@@ -8,19 +8,13 @@ Arquivos temporarios em `data/work` podem ser descartados quando nao houver proc
 
 ## Backup online do SQLite
 
-O backup online usa a API nativa do SQLite e evita copiar um banco ativo de forma inconsistente. Execute a partir da raiz do checkout:
-
-```bash
-docker compose -f deploy/compose.yaml exec -T backend python -c "from datetime import datetime, timezone; from pathlib import Path; import sqlite3; stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'); target=Path('/app/data/backups') / f'portfolio-{stamp}.db'; target.parent.mkdir(parents=True, exist_ok=True); source=sqlite3.connect('/app/data/portfolio.db'); backup=sqlite3.connect(target); source.backup(backup); result=backup.execute('PRAGMA integrity_check').fetchone()[0]; backup.close(); source.close(); print(f'{target} {result}')"
-```
-
-O resultado deve terminar em `ok`. Em seguida, copie o arquivo gerado para `/srv/pirata/cetruslabia/backups` e para um destino fora da maquina Pirata.
+O procedimento versionado no `cluster-stacks` deve usar a API nativa de backup do SQLite, validar a copia com `PRAGMA integrity_check` e transferi-la para um destino fora da maquina Pirata. Nao copie o arquivo ativo diretamente nem execute uma rotina improvisada no host.
 
 ## Backup frio antes da primeira migracao
 
 1. Confirme que nao ha jobs em execucao.
-2. Pare somente o servico antigo que grava no banco.
-3. Copie o diretorio de dados inteiro, incluindo `portfolio.db`, `portfolio.db-wal` e `portfolio.db-shm` quando existirem.
+2. Use o job ou procedimento versionado da stack para parar somente o backend.
+3. Preserve o diretorio de dados inteiro, incluindo `portfolio.db`, `portfolio.db-wal` e `portfolio.db-shm` quando existirem.
 4. Preserve proprietario, permissoes e timestamps.
 5. Valide uma copia do banco com `PRAGMA integrity_check`.
 6. Registre o commit ou a imagem correspondente ao backup.
@@ -29,7 +23,7 @@ Nao copie apenas `portfolio.db` enquanto o processo estiver gravando.
 
 ## Restauracao
 
-Restaurar um backup descarta dados gravados depois dele. Obtenha autorizacao explicita antes de prosseguir.
+Restaurar um backup descarta dados gravados depois dele. Obtenha autorizacao explicita e execute somente pelo procedimento versionado da stack.
 
 1. Pare somente o backend do CetrusLabIA.
 2. Copie o diretorio atual para uma area de seguranca com timestamp.

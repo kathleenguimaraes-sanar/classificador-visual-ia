@@ -1,101 +1,58 @@
 # Implantacao na maquina Pirata
 
-Este diretorio prepara o macropasso 2 de `PLANO_IMPLANTACAO.md`. Os comandos devem ser executados somente depois de revisar os caminhos, a porta e o estado dos jobs da aplicacao.
+O repositorio GitLab `sanardigital/pirata/infra-pirata/cluster-stacks` e a unica fonte de verdade da implantacao. Este repositorio descreve apenas o contrato da aplicacao; nao contem manifest de producao nem arquivo com segredos.
 
-## Ambiente confirmado
+Antes de qualquer operacao na maquina Pirata, carregue a skill `maquina-pirata`. Nao instale, configure, suba containers ou altere o host manualmente.
 
-- Ubuntu 26.04 LTS `x86_64`;
-- Docker Engine 29.6.2 e Docker Compose 5.3.1;
-- Docker Swarm ativo em no unico, sem alteracao planejada;
-- 30 GiB de RAM e 4 GiB de swap;
-- 88 GiB livres na particao principal no levantamento inicial;
-- porta `8000` ocupada por outro servico;
-- Cloudflare Tunnel existente na rede `host`.
+## Fluxo
 
-O CetrusLabIA sera executado por Compose standalone, isolado das stacks Swarm. A API ficara em `127.0.0.1:8106` por padrao e nao sera acessivel diretamente pela rede.
+1. Finalize e homologue o commit da aplicacao.
+2. Crie ou ajuste a stack `cetruslabia` no `cluster-stacks`.
+3. Versione `stack.yml`, `secrets.map`, persistencia, healthcheck e configuracao do tunnel.
+4. Abra MR e aguarde o CI ficar verde.
+5. Envie o MR e o nome da stack ao Pedro Mascarenhas para revisao.
+6. Somente depois da aprovacao e do merge, deixe o runner `pirata-fisica` fazer o deploy e as verificacoes.
+7. Publique o frontend Lovable apenas depois de o servico estar saudavel.
 
-## Arquivos e caminhos
+Hermes nao participa deste servico, pois ele nao e um servico de agente.
 
-- checkout: `/srv/pirata/cetruslabia/app`;
-- configuracao secreta: `/srv/pirata/cetruslabia/backend.env`;
-- dados persistentes: `/srv/pirata/cetruslabia/data`;
-- backups locais temporarios: `/srv/pirata/cetruslabia/backups`;
-- manifest: `deploy/compose.yaml`.
+## Contrato da stack
 
-O banco e seus arquivos WAL/SHM devem permanecer no mesmo volume persistente. Nao monte somente `portfolio.db`.
+- imagem imutavel identificada pelo commit homologado;
+- API publicada na porta de host reservada pelo `cluster-stacks`;
+- `CETRUS_DATA_DIR=/app/data` em armazenamento persistente;
+- diretorio persistente contendo `portfolio.db` e seus arquivos WAL/SHM;
+- restart policy e healthcheck em `/health`;
+- parada graciosa suficiente para encerrar o processamento atual;
+- nenhuma dependencia de GPU ou Ollama em producao;
+- nenhuma credencial em variavel versionada ou arquivo `.env`.
 
-## Preparacao
+## Configuracao e secrets
 
-1. Confirme que `8106` continua livre.
-2. Confirme que nao ha jobs em execucao na instalacao anterior.
-3. Crie os diretorios de checkout, dados e backups.
-4. Copie `deploy/backend.env.example` para o caminho externo `backend.env`.
-5. Preencha os segredos diretamente na Pirata e restrinja a leitura do arquivo ao administrador do deploy.
-6. Se existir um banco anterior, siga `deploy/BACKUP_RESTORE.md` antes de move-lo.
-7. Use o commit homologado da branch de feature; nao e necessario fazer merge na `main`.
+Configuracoes nao secretas ficam no `stack.yml`. Credenciais ficam no 1Password e sao entregues como Docker Secrets por `secrets.map`; os valores nao podem tocar Git, Slack, CI ou arquivos locais.
 
-Variaveis operacionais opcionais podem ser informadas antes de cada comando:
+Secrets esperados:
 
-```bash
-export CETRUS_IMAGE_TAG=358665d
-export CETRUS_HOST_PORT=8106
-export CETRUS_ENV_FILE=/srv/pirata/cetruslabia/backend.env
-export CETRUS_DATA_HOST_DIR=/srv/pirata/cetruslabia/data
-```
+- senha da aplicacao;
+- segredo de assinatura das sessoes;
+- chaves dos provedores de IA habilitados;
+- token de delivery do JW Player, se necessario.
 
-Use como tag o SHA efetivamente implantado. O exemplo acima deve ser atualizado quando houver novo commit homologado.
+## Exposicao externa
 
-## Validacao do manifest
+Use o named tunnel `piratas-fisica`, Worker e binding de VPC Service. Nunca use quick tunnel nem acesse um hostname `<uuid>.cfargotunnel.com` a partir do Worker. O procedimento esta em `deploy/CLOUDFLARE.md`.
 
-Execute a partir da raiz do checkout:
+Processamentos longos continuam no backend como jobs assincronos; nenhuma requisicao sincronica pelo edge deve aguardar o lote completo.
 
-```bash
-docker compose -f deploy/compose.yaml config --quiet
-docker compose -f deploy/compose.yaml build backend
-```
+## Criterios antes de publicar
 
-A construcao local pode consumir CPU, memoria e disco. Na primeira instalacao, execute em horario controlado e acompanhe os servicos existentes. Atualizacoes futuras devem preferir uma imagem ja construida e identificada por SHA.
+- stack e configuracao versionadas no `cluster-stacks`;
+- MR revisado e CI verde;
+- deploy executado pelo runner `pirata-fisica`;
+- secrets entregues por 1Password e Docker Secrets;
+- dados persistentes, backup e restart validados;
+- `/health` retorna HTTP 200 e `/api/status` sem token retorna HTTP 401;
+- hostname estavel validado pelo Worker/VPC Service;
+- logs e smoke test de producao verificados.
 
-## Inicializacao
-
-```bash
-docker compose -f deploy/compose.yaml up -d --build --wait --wait-timeout 180 backend
-docker compose -f deploy/compose.yaml ps backend
-docker compose -f deploy/compose.yaml logs --since=10m backend
-```
-
-Nunca execute `docker compose down -v`, `docker system prune` ou comandos globais do Swarm como parte deste deploy.
-
-## Smoke test local
-
-```bash
-curl --fail --show-error http://127.0.0.1:8106/health
-curl --output /dev/null --write-out '%{http_code}\n' http://127.0.0.1:8106/api/status
-```
-
-Resultados esperados:
-
-- `/health`: HTTP 200 e `{"ok":true}`;
-- `/api/status` sem cookie: HTTP 401;
-- container: estado `healthy`;
-- demais stacks e servicos: sem alteracao.
-
-Depois do login, valide importacao, um processamento representativo e persistencia apos `docker compose restart backend`.
-
-## Integracao futura com Cloudflare
-
-O tunnel existente usa a rede do host. Depois de definir o dominio, adicione uma rota para `http://127.0.0.1:8106`. Nao conecte o CetrusLabIA as redes das outras stacks e nao exponha a porta em `0.0.0.0`.
-
-Mantenha `APP_AUTH_TRUST_PROXY_HEADERS=false` ate confirmar que o acesso direto esta bloqueado e que o proxy sobrescreve os cabecalhos de IP do cliente.
-
-## Atualizacao e rollback
-
-1. Confirme que nao ha jobs `queued` ou `running`.
-2. Gere um backup consistente do SQLite.
-3. Construa ou disponibilize a nova imagem antes da janela de troca.
-4. Atualize `CETRUS_IMAGE_TAG` para o novo SHA.
-5. Execute `docker compose -f deploy/compose.yaml up -d --no-build --wait backend`.
-6. Execute o smoke test imediatamente.
-7. Em falha, volte para a tag anterior. Restaure banco somente quando necessario e com autorizacao explicita, pois isso descarta gravacoes posteriores ao backup.
-
-Nao ha garantia de zero downtime: fila, sessao da aplicacao e login do JW Player ficam em memoria. Uma atualizacao deve ser uma parada curta e controlada, com novo login depois da reinicializacao.
+Nao ha garantia de zero downtime: fila, sessoes da aplicacao e login do JW Player ficam em memoria. Atualizacoes exigem uma parada curta e novo login.

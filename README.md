@@ -5,7 +5,7 @@ Monorepo da aplicação para importar, organizar, processar, classificar e valid
 ## Estrutura
 
 - `src/` — frontend React/Vite/TypeScript operado pelo Lovable;
-- `backend/` — API FastAPI, pipeline de mídia, interface web legada e testes;
+- `backend/` — API FastAPI, pipeline de mídia, interface local legada e testes;
 - `render.yaml` — configuração legada de deploy do backend no Render.
 
 ## Frontend
@@ -17,7 +17,7 @@ npm install
 npm run dev
 ```
 
-O Vite também encaminha `/api` e `/health` para `http://127.0.0.1:8000` quando `VITE_API_BASE_URL` não estiver definido. Em produção, configure o domínio HTTPS da API no ambiente do Lovable.
+O Vite também encaminha `/api` e `/health` para `http://127.0.0.1:8000` quando `VITE_API_BASE_URL` não estiver definido. O build de produção usa `https://cetruslabia.tech-pirata.workers.dev`, definido em `.env.production`.
 
 ## O que já está disponível
 
@@ -57,13 +57,13 @@ Preencha também `APP_AUTH_USERNAME`, `APP_AUTH_PASSWORD` e uma chave aleatória
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-`CORS_ALLOWED_ORIGINS` recebe as origens exatas autorizadas a acessar a API, separadas por vírgula. Não use `*`. O frontend deve enviar as requisições com `credentials: "include"` para receber e reutilizar o cookie HttpOnly.
+`CORS_ALLOWED_ORIGINS` recebe as origens exatas autorizadas a acessar a API, separadas por vírgula. Não use `*`. Depois do login, o frontend mantém o token de acesso somente em memória e o envia em `Authorization: Bearer`; ele nunca é gravado em `localStorage`.
 
-Em desenvolvimento HTTP, use `APP_AUTH_COOKIE_SECURE=false` e `APP_AUTH_COOKIE_SAMESITE=lax`. Em produção, use um domínio próprio compartilhado, como `cetruslabia.exemplo.com` no Lovable e `api.cetruslabia.exemplo.com` na máquina Pirata, com `APP_AUTH_COOKIE_SECURE=true` e `APP_AUTH_COOKIE_SAMESITE=lax`. Essa configuração evita depender de cookies de terceiros, bloqueados por alguns navegadores.
+Em produção, o frontend usa `https://cetruslabia.lovable.app` e a API usa `https://cetruslabia.tech-pirata.workers.dev`. Como são sites diferentes, a autenticação Bearer evita depender de cookies de terceiros. Recarregar a página ou reiniciar o navegador exige novo login.
 
 O backend limita falhas de login por origem. Quando ele estiver acessível exclusivamente por um proxy ou túnel confiável, `APP_AUTH_TRUST_PROXY_HEADERS=true` permite identificar o cliente pelos cabeçalhos encaminhados. Mantenha `false` se a aplicação aceitar conexões diretas.
 
-As únicas rotas públicas da API são `/health` e `/api/auth/*`. Com autenticação habilitada, as demais rotas, o Swagger e o schema OpenAPI exigem uma sessão válida.
+As únicas rotas públicas da API são `/health`, `/api/auth/login` e `/api/auth/session`. Com autenticação habilitada, logout, demais rotas, Swagger e schema OpenAPI exigem um token válido.
 
 O logout invalida todas as sessões da aplicação imediatamente. Reiniciar o backend também exige novo login, assim como já ocorre com a sessão do JW Player.
 
@@ -73,9 +73,9 @@ Antes de iniciar o backend pela nova estrutura, mova a configuração local da r
 
 O diretório de dados padrão agora é `backend/data`. Para preservar um banco existente, mova o conteúdo do antigo `data/` para `backend/data/` com o serviço parado ou defina `CETRUS_DATA_DIR` com o caminho absoluto do diretório antigo. Faça uma cópia de segurança de `portfolio.db` antes da migração.
 
-Depois da instalação inicial, também é possível iniciar com duplo clique em `iniciar_aplicacao.bat`.
+Depois da instalação inicial, também é possível iniciar com duplo clique em `iniciar_aplicacao.bat` quando a autenticação estiver desabilitada para uso local.
 
-Abra `http://127.0.0.1:8000` no navegador. `/docs` mostra a documentação interativa (Swagger) gerada pelo FastAPI, e `/health` confirma que o processo está de pé.
+Com `APP_AUTH_ENABLED=false`, abra `http://127.0.0.1:8000` para usar a interface legada. `/health` confirma que o processo está de pé. Com autenticação habilitada, a raiz não publica essa interface e `/docs` exige Bearer.
 
 ## Conexão com o JW Player
 
@@ -108,7 +108,7 @@ docker build -t cetruslabia-backend ./backend
 docker run --rm -p 8000:8000 --env-file ./backend/.env cetruslabia-backend
 ```
 
-Esse comando e somente para desenvolvimento local. Na maquina Pirata, use `deploy/compose.yaml`, que configura volume persistente, healthcheck, reinicio automatico e publica a API apenas em `127.0.0.1:8106`. O procedimento completo esta em `deploy/README.md`.
+Esse comando e somente para desenvolvimento local. O deploy na maquina Pirata e versionado no repositorio GitLab `sanardigital/pirata/infra-pirata/cluster-stacks` e executado exclusivamente pelo CI do runner `pirata-fisica`. O contrato operacional esta em `deploy/README.md`.
 
 Os artefatos do backend ficam em `backend/`:
 
@@ -116,5 +116,7 @@ Os artefatos do backend ficam em `backend/`:
 - `backend/.dockerignore` — limita o contexto da imagem;
 - `render.yaml` — Blueprint do serviço (sem segredos);
 - `backend/.env.example` — referência das variáveis de ambiente.
-- `deploy/compose.yaml` — execucao isolada na maquina Pirata;
-- `deploy/BACKUP_RESTORE.md` — backup e restauracao do SQLite.
+- `deploy/README.md` — contrato para a stack versionada no `cluster-stacks`;
+- `deploy/BACKUP_RESTORE.md` — requisitos de backup e restauracao do SQLite;
+- `deploy/CLOUDFLARE.md` — Worker, VPC Service e rota HTTPS da API;
+- `deploy/LOVABLE.md` — criacao e sincronizacao do frontend no Lovable.
